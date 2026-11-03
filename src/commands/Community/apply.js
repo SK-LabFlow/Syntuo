@@ -1,5 +1,5 @@
 import { getColor, getDefaultApplicationQuestions } from '../../config/bot.js';
-import { SlashCommandBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle } from 'discord.js';
+import { SlashCommandBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
 import { createEmbed, successEmbed } from '../../utils/embeds.js';
 import { logger } from '../../utils/logger.js';
 import { handleInteractionError, withErrorHandling, createError, ErrorTypes, replyUserError } from '../../utils/errorHandler.js';
@@ -41,7 +41,7 @@ export function formatQuestionLabel(question, index) {
     return `${prefix}${cleanQ}${suffix}`;
 }
 
-function getApplicationStatusPresentation(statusValue) {
+export function getApplicationStatusPresentation(statusValue) {
     const normalized = typeof statusValue === 'string' ? statusValue.trim().toLowerCase() : 'unknown';
     const statusLabel =
         normalized === 'pending' ? 'In Progress' :
@@ -284,31 +284,70 @@ export async function handleApplicationModal(interaction) {
         const logChannelId = resolveApplicationLogChannel(guildConfig, roleSettings, settings);
 
         if (logChannelId) {
-            const logMessage = await logEvent({
-                client: interaction.client,
-                guildId: interaction.guild.id,
-                eventType: EVENT_TYPES.APPLICATION_SUBMIT,
-                channelId: logChannelId,
-                data: {
-                    title: 'Application Submitted',
-                    lines: [
-                        formatLogLine('Applicant', `<@${interaction.user.id}> (${interaction.user.tag})`),
-                        formatLogLine('Application', applicationRole.name),
-                        formatLogLine('Role', role.name),
-                        formatLogLine('Questions', `${allAnswers.length} compulsory question(s)`),
-                        formatLogLine('Application ID', `\`${application.id}\``),
-                    ],
-                    inlineFields: [
-                        { name: 'Status', value: '🟡 In Progress', inline: true },
-                    ],
-                    author: await resolveUserAuthor(interaction.client, interaction.user.id),
-                },
-            });
+            try {
+                const logChannel = interaction.guild.channels.cache.get(logChannelId)
+                    || await interaction.guild.channels.fetch(logChannelId).catch(() => null);
 
-            if (logMessage) {
-                await updateApplication(interaction.client, interaction.guild.id, application.id, {
-                    logMessageId: logMessage.id,
+                if (logChannel && logChannel.isTextBased()) {
+                    const reviewEmbed = new EmbedBuilder()
+                        .setTitle(`📋 New Staff Application: ${applicationRole.name}`)
+                        .setColor(getColor('info') || 0x5865F2)
+                        .setAuthor({
+                            name: `${interaction.user.tag} (${interaction.user.id})`,
+                            iconURL: interaction.user.displayAvatarURL({ dynamic: true })
+                        })
+                        .setDescription(
+                            `**Applicant:** <@${interaction.user.id}> (\`${interaction.user.tag}\`)\n` +
+                            `**Role Applied For:** <@&${role.id}> (\`${role.name}\`)\n` +
+                            `**Application ID:** \`${application.id}\`\n` +
+                            `**Status:** 🟡 **Pending Review**\n` +
+                            `**Submitted:** <t:${Math.floor(Date.now() / 1000)}:F> (<t:${Math.floor(Date.now() / 1000)}:R>)\n\n` +
+                            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
+                        )
+                        .setFooter({ text: `Application ID: ${application.id} • Use buttons below to review` })
+                        .setTimestamp();
+
+                    allAnswers.forEach((ans, idx) => {
+                        const qTitle = `Q${idx + 1}: ${ans.question}`;
+                        const qAns = ans.answer || '*No answer provided*';
+                        reviewEmbed.addFields({
+                            name: qTitle.length > 256 ? `${qTitle.substring(0, 253)}...` : qTitle,
+                            value: qAns.length > 1024 ? `${qAns.substring(0, 1020)}...` : qAns,
+                            inline: false
+                        });
+                    });
+
+                    const reviewButtons = new ActionRowBuilder().addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(`app_channel_approve_${application.id}`)
+                            .setLabel('Approve')
+                            .setEmoji('✅')
+                            .setStyle(ButtonStyle.Success),
+                        new ButtonBuilder()
+                            .setCustomId(`app_channel_deny_${application.id}`)
+                            .setLabel('Deny')
+                            .setEmoji('❌')
+                            .setStyle(ButtonStyle.Danger)
+                    );
+
+                    const sentMsg = await logChannel.send({
+                        embeds: [reviewEmbed],
+                        components: [reviewButtons]
+                    });
+
+                    if (sentMsg) {
+                        await updateApplication(interaction.client, interaction.guild.id, application.id, {
+                            logMessageId: sentMsg.id,
+                            logChannelId: logChannel.id,
+                        });
+                    }
+                }
+            } catch (postErr) {
+                logger.error('Failed to post application card to review channel:', {
+                    error: postErr.message,
+                    guildId: interaction.guild.id,
                     logChannelId,
+                    applicationId: application.id
                 });
             }
         }
@@ -715,4 +754,166 @@ async function handleStatus(interaction) {
 
         return InteractionHelper.safeEditReply(interaction, { embeds: [embed], flags: ["Ephemeral"] });
     }
+}
+
+export async function handleApplicationChannelButton(interaction) {
+    if (!interaction.isButton()) return;
+    const { customId, client, guild, member } = interaction;
+    if (!customId.startsWith('app_channel_approve_') && !customId.startsWith('app_channel_deny_')) return;
+
+    try {
+        await ApplicationService.checkManagerPermission(client, guild.id, member);
+    } catch {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.PERMISSION,
+            message: 'You do not have permission to review applications.'
+        });
+    }
+
+    const isApprove = customId.startsWith('app_channel_approve_');
+    const appId = customId.replace(isApprove ? 'app_channel_approve_' : 'app_channel_deny_', '');
+
+    const application = await getApplication(client, guild.id, appId);
+    if (!application) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.USER_INPUT,
+            message: 'Application not found in database.'
+        });
+    }
+
+    if (application.status !== 'pending') {
+        const statusView = getApplicationStatusPresentation(application.status);
+        return await replyUserError(interaction, {
+            type: ErrorTypes.VALIDATION,
+            message: `This application has already been processed (${statusView.statusEmoji} **${statusView.statusLabel}**).`
+        });
+    }
+
+    const modal = new ModalBuilder()
+        .setCustomId(`app_channel_modal_${appId}_${isApprove ? 'approve' : 'deny'}`)
+        .setTitle(`${isApprove ? 'Approve' : 'Deny'} Application`);
+
+    const reasonInput = new TextInputBuilder()
+        .setCustomId('review_reason')
+        .setLabel(`Reason / Notes (${isApprove ? 'Optional' : 'Required'})`)
+        .setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder(isApprove ? 'e.g. Welcome to the team! Great answers.' : 'e.g. Does not meet requirements at this time.')
+        .setMaxLength(500)
+        .setRequired(!isApprove);
+
+    const row = new ActionRowBuilder().addComponents(reasonInput);
+    modal.addComponents(row);
+
+    await interaction.showModal(modal);
+}
+
+export async function handleApplicationChannelModal(interaction) {
+    if (!interaction.isModalSubmit()) return;
+    const { customId, client, guild, member } = interaction;
+    if (!customId.startsWith('app_channel_modal_')) return;
+
+    const parts = customId.split('_');
+    const action = parts[parts.length - 1];
+    const appId = parts.slice(3, parts.length - 1).join('_');
+    const isApprove = action === 'approve';
+
+    try {
+        await ApplicationService.checkManagerPermission(client, guild.id, member);
+    } catch {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.PERMISSION,
+            message: 'You do not have permission to review applications.'
+        });
+    }
+
+    const application = await getApplication(client, guild.id, appId);
+    if (!application) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.USER_INPUT,
+            message: 'Application not found.'
+        });
+    }
+
+    if (application.status !== 'pending') {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.VALIDATION,
+            message: 'This application has already been processed.'
+        });
+    }
+
+    const reason = interaction.fields.getTextInputValue('review_reason')?.trim() || (isApprove ? 'Welcome to the team!' : 'No reason provided.');
+
+    await ApplicationService.reviewApplication(client, guild.id, appId, {
+        action,
+        reason,
+        reviewerId: interaction.user.id
+    });
+
+    const statusView = getApplicationStatusPresentation(isApprove ? 'approved' : 'denied');
+
+    let roleAssigned = false;
+    if (isApprove && application.roleId) {
+        try {
+            const applicantMember = await guild.members.fetch(application.userId).catch(() => null);
+            if (applicantMember) {
+                await applicantMember.roles.add(application.roleId);
+                roleAssigned = true;
+            }
+        } catch (roleErr) {
+            logger.error('Failed to assign role to approved applicant:', roleErr);
+        }
+    }
+
+    try {
+        const applicantUser = await client.users.fetch(application.userId).catch(() => null);
+        if (applicantUser) {
+            const dmEmbed = createEmbed({
+                title: `${statusView.statusEmoji} Application ${statusView.statusLabel}`,
+                description: `Your application for **${application.roleName}** in **${guild.name}** has been **${statusView.statusLabel}**!\n\n` +
+                    `**Reviewer:** <@${interaction.user.id}>\n` +
+                    `**Reason / Note:** ${reason}\n\n` +
+                    (isApprove ? `🎉 Congratulations! Your role has been granted.` : `Thank you for your interest. You may apply again in the future.`),
+                color: isApprove ? 'success' : 'error'
+            });
+            await applicantUser.send({ embeds: [dmEmbed] }).catch(() => null);
+        }
+    } catch (dmErr) {
+        logger.warn('Failed to DM applicant on application decision:', dmErr);
+    }
+
+    try {
+        if (interaction.message) {
+            const originalEmbed = interaction.message.embeds[0];
+            const updatedEmbed = EmbedBuilder.from(originalEmbed)
+                .setColor(isApprove ? 0x57F287 : 0xED4245)
+                .addFields([
+                    { name: 'Review Decision', value: `${statusView.statusEmoji} **${statusView.statusLabel}** by <@${interaction.user.id}>`, inline: true },
+                    { name: 'Review Reason', value: reason, inline: false }
+                ]);
+
+            const disabledRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`app_channel_done_${appId}`)
+                    .setLabel(`${statusView.statusLabel} by @${interaction.user.username}`)
+                    .setStyle(isApprove ? ButtonStyle.Success : ButtonStyle.Danger)
+                    .setDisabled(true)
+            );
+
+            await interaction.message.edit({
+                embeds: [updatedEmbed],
+                components: [disabledRow]
+            });
+        }
+    } catch (editErr) {
+        logger.warn('Failed to edit channel application message:', editErr);
+    }
+
+    await interaction.reply({
+        embeds: [successEmbed(
+            `Application ${statusView.statusLabel}`,
+            `Successfully marked application \`${appId}\` as **${statusView.statusLabel}**.` +
+            (isApprove ? (roleAssigned ? '\nRole has been granted to the applicant.' : '\n(Note: Member could not be found in the server to assign the role)') : '')
+        )],
+        flags: ['Ephemeral']
+    });
 }

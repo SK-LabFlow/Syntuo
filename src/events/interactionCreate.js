@@ -335,6 +335,20 @@ export default {
             return;
           }
 
+          if (interaction.customId.startsWith('app_channel_')) {
+            try {
+              const { handleApplicationChannelButton } = await import('../commands/Community/apply.js');
+              await handleApplicationChannelButton(interaction);
+            } catch (error) {
+              await handleInteractionError(interaction, error, withTraceContext({
+                type: 'button',
+                customId: interaction.customId,
+                handler: 'application_channel_button'
+              }, interactionTraceContext));
+            }
+            return;
+          }
+
           if (interaction.customId.startsWith('shared_todo_')) {
             const parts = interaction.customId.split('_');
             const buttonType = parts.slice(0, 3).join('_');
@@ -421,6 +435,20 @@ export default {
                 type: 'modal',
                 customId: interaction.customId,
                 handler: 'application'
+              }, interactionTraceContext));
+            }
+            return;
+          }
+
+          if (interaction.customId.startsWith('app_channel_modal_')) {
+            try {
+              const { handleApplicationChannelModal } = await import('../commands/Community/apply.js');
+              await handleApplicationChannelModal(interaction);
+            } catch (error) {
+              await handleInteractionError(interaction, error, withTraceContext({
+                type: 'modal',
+                customId: interaction.customId,
+                handler: 'application_channel_modal'
               }, interactionTraceContext));
             }
             return;

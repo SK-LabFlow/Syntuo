@@ -17,6 +17,7 @@ import {
     deleteApplication
 } from '../../utils/database.js';
 import { InteractionHelper } from '../../utils/interactionHelper.js';
+import { setLogChannel } from '../../services/loggingService.js';
 import appDashboard from './modules/app_dashboard.js';
 
 function getApplicationStatusPresentation(statusValue) {
@@ -100,6 +101,24 @@ export default {
     )
     .addSubcommand((subcommand) =>
         subcommand
+            .setName("channel")
+            .setDescription("Set the channel where submitted applications appear for staff review")
+            .addChannelOption((option) =>
+                option
+                    .setName("channel")
+                    .setDescription("The channel where applications will be sent for review")
+                    .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+                    .setRequired(true),
+            )
+            .addRoleOption((option) =>
+                option
+                    .setName("role")
+                    .setDescription("Optionally set this channel for a specific application role only")
+                    .setRequired(false),
+            ),
+    )
+    .addSubcommand((subcommand) =>
+        subcommand
             .setName("panel")
             .setDescription("Send an application panel to a channel so members can click to apply")
             .addChannelOption((option) =>
@@ -113,6 +132,13 @@ export default {
                 option
                     .setName("role")
                     .setDescription("The Discord role members will apply for (e.g. @Staff)")
+                    .setRequired(false),
+            )
+            .addChannelOption((option) =>
+                option
+                    .setName("review_channel")
+                    .setDescription("Channel where new applications land for staff review (e.g. #staff-apps)")
+                    .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
                     .setRequired(false),
             )
             .addStringOption((option) =>
@@ -257,7 +283,9 @@ export default {
             return;
         }
 
-        if (subcommand === "panel") {
+        if (subcommand === "channel") {
+            await handleSetReviewChannel(interaction);
+        } else if (subcommand === "panel") {
             await handlePanel(interaction);
         } else if (subcommand === "setup") {
             await handleSetup(interaction);
@@ -278,6 +306,7 @@ async function handlePanel(interaction) {
 
     const targetChannel = options.getChannel('channel', true);
     const specifiedRole = options.getRole('role');
+    const reviewChannel = options.getChannel('review_channel');
     const selectedAppName = options.getString('application');
     const customTitle = options.getString('title');
     const customDesc = options.getString('description');
@@ -285,6 +314,13 @@ async function handlePanel(interaction) {
 
     let applicationRoles = await getApplicationRoles(client, guild.id);
     const settings = await getApplicationSettings(client, guild.id);
+
+    // If review channel is specified, configure it as the applications log channel
+    if (reviewChannel) {
+        settings.logChannelId = reviewChannel.id;
+        await saveApplicationSettings(client, guild.id, settings);
+        await setLogChannel(client, guild.id, 'applications', reviewChannel.id);
+    }
 
     // If staff specified a role directly (e.g. role:@Staff), auto-register it if not already present
     if (specifiedRole) {
@@ -299,7 +335,14 @@ async function handlePanel(interaction) {
             await saveApplicationRoles(client, guild.id, applicationRoles);
 
             const questions = settings.questions?.length ? settings.questions : getDefaultApplicationQuestions();
-            await saveApplicationRoleSettings(client, guild.id, specifiedRole.id, { questions });
+            await saveApplicationRoleSettings(client, guild.id, specifiedRole.id, {
+                questions,
+                ...(reviewChannel ? { logChannelId: reviewChannel.id } : {})
+            });
+        } else if (reviewChannel) {
+            const roleSettings = await getApplicationRoleSettings(client, guild.id, specifiedRole.id);
+            roleSettings.logChannelId = reviewChannel.id;
+            await saveApplicationRoleSettings(client, guild.id, specifiedRole.id, roleSettings);
         }
         if (!settings.enabled) {
             await ApplicationService.updateSettings(client, guild.id, { enabled: true });
@@ -370,12 +413,18 @@ async function handlePanel(interaction) {
             components: [row]
         });
 
+        const currentReviewChannelId = reviewChannel?.id || settings.logChannelId;
+        const reviewNotice = currentReviewChannelId
+            ? `\n\n📢 **Review Channel:** <#${currentReviewChannelId}> (Submissions will appear here with questions, answers, and **Approve/Deny** buttons)`
+            : `\n\n⚠️ **Review Channel Not Set:** Run \`/app-admin channel channel:#staff-apps\` so new applications appear in a channel for staff to review!`;
+
         return await InteractionHelper.safeEditReply(interaction, {
             embeds: [successEmbed(
                 '✅ Application Panel Sent',
-                `Successfully posted the application panel for **${targetAppRole.name}** into ${targetChannel}!\n\n` +
-                `Members can now click the button to apply directly.\n` +
-                `[Jump to Panel Message](${sentMsg.url})`
+                `Successfully posted the application panel with **${buttons.length} role(s)** into ${targetChannel}!\n\n` +
+                `Members can now click the buttons to apply directly.\n` +
+                `[Jump to Panel Message](${sentMsg.url})` +
+                reviewNotice
             )]
         });
     }
@@ -408,12 +457,61 @@ async function handlePanel(interaction) {
         components: [row]
     });
 
+    const currentReviewChannelId = reviewChannel?.id || settings.logChannelId;
+    const reviewNotice = currentReviewChannelId
+        ? `\n\n📢 **Review Channel:** <#${currentReviewChannelId}> (Submissions will appear here with questions, answers, and **Approve/Deny** buttons)`
+        : `\n\n⚠️ **Review Channel Not Set:** Run \`/app-admin channel channel:#staff-apps\` so new applications appear in a channel for staff to review!`;
+
     return await InteractionHelper.safeEditReply(interaction, {
         embeds: [successEmbed(
             '✅ Application Panel Sent',
             `Successfully posted the application panel with **${buttons.length} role(s)** into ${targetChannel}!\n\n` +
             `Members can now click the buttons to apply directly.\n` +
-            `[Jump to Panel Message](${sentMsg.url})`
+            `[Jump to Panel Message](${sentMsg.url})` +
+            reviewNotice
+        )]
+    });
+}
+
+async function handleSetReviewChannel(interaction) {
+    const { client, guild, member, options } = interaction;
+    await ApplicationService.checkManagerPermission(client, guild.id, member);
+
+    const channel = options.getChannel('channel', true);
+    const specificRole = options.getRole('role');
+
+    const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
+    if (botMember && !channel.permissionsFor(botMember)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.PERMISSION,
+            message: `I need **View Channel**, **Send Messages**, and **Embed Links** permissions in ${channel}.`
+        });
+    }
+
+    if (specificRole) {
+        const roleSettings = await getApplicationRoleSettings(client, guild.id, specificRole.id);
+        roleSettings.logChannelId = channel.id;
+        await saveApplicationRoleSettings(client, guild.id, specificRole.id, roleSettings);
+
+        return await InteractionHelper.safeEditReply(interaction, {
+            embeds: [successEmbed(
+                '✅ Review Channel Configured',
+                `Submitted applications for **${specificRole.name}** will now appear directly in ${channel}!\n\n` +
+                `Staff will see all questions & answers with **Approve** and **Deny** buttons right on the message.`
+            )]
+        });
+    }
+
+    const settings = await getApplicationSettings(client, guild.id);
+    settings.logChannelId = channel.id;
+    await saveApplicationSettings(client, guild.id, settings);
+    await setLogChannel(client, guild.id, 'applications', channel.id);
+
+    return await InteractionHelper.safeEditReply(interaction, {
+        embeds: [successEmbed(
+            '✅ Review Channel Configured',
+            `All submitted applications will now appear directly in ${channel}!\n\n` +
+            `Staff will see all questions & answers with **Approve** and **Deny** buttons right on the message.`
         )]
     });
 }
