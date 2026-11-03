@@ -1,6 +1,6 @@
 import { SlashCommandBuilder, PermissionFlagsBits, PermissionsBitField, ChannelType, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ComponentType, LabelBuilder, RoleSelectMenuBuilder } from 'discord.js';
 import { createEmbed, successEmbed } from '../../utils/embeds.js';
-import { getColor, getApplicationStatusColor } from '../../config/bot.js';
+import { getColor, getApplicationStatusColor, getDefaultApplicationQuestions } from '../../config/bot.js';
 import { logger } from '../../utils/logger.js';
 import { withErrorHandling, createError, ErrorTypes, replyUserError } from '../../utils/errorHandler.js';
 import ApplicationService from '../../services/applicationService.js';
@@ -97,6 +97,69 @@ export default {
                     .setRequired(false)
                     .setAutocomplete(true),
             ),
+    )
+    .addSubcommandGroup((group) =>
+        group
+            .setName("question")
+            .setDescription("Manage application questions (all compulsory *)")
+            .addSubcommand((sub) =>
+                sub
+                    .setName("add")
+                    .setDescription("Add a new compulsory question (*)")
+                    .addStringOption((opt) =>
+                        opt
+                            .setName("question")
+                            .setDescription("The question text to ask applicants (max 100 characters)")
+                            .setRequired(true)
+                            .setMaxLength(100)
+                    )
+                    .addRoleOption((opt) =>
+                        opt
+                            .setName("role")
+                            .setDescription("Target a specific application role (leave empty for global)")
+                            .setRequired(false)
+                    )
+            )
+            .addSubcommand((sub) =>
+                sub
+                    .setName("remove")
+                    .setDescription("Remove a question by its number")
+                    .addIntegerOption((opt) =>
+                        opt
+                            .setName("number")
+                            .setDescription("The question number to remove (1, 2, 3...)")
+                            .setRequired(true)
+                            .setMinValue(1)
+                    )
+                    .addRoleOption((opt) =>
+                        opt
+                            .setName("role")
+                            .setDescription("Target a specific application role (leave empty for global)")
+                            .setRequired(false)
+                    )
+            )
+            .addSubcommand((sub) =>
+                sub
+                    .setName("list")
+                    .setDescription("List all configured application questions (all compulsory *)")
+                    .addRoleOption((opt) =>
+                        opt
+                            .setName("role")
+                            .setDescription("Target a specific application role (leave empty for global)")
+                            .setRequired(false)
+                    )
+            )
+            .addSubcommand((sub) =>
+                sub
+                    .setName("clear")
+                    .setDescription("Reset questions back to default questions")
+                    .addRoleOption((opt) =>
+                        opt
+                            .setName("role")
+                            .setDescription("Target a specific application role (leave empty for global)")
+                            .setRequired(false)
+                    )
+            )
     ),
 
     category: "Community",
@@ -107,19 +170,26 @@ export default {
         }
 
         const { options, guild, member } = interaction;
+        const subcommandGroup = options.getSubcommandGroup(false);
         const subcommand = options.getSubcommand();
 
         if (subcommand !== 'dashboard' && subcommand !== 'setup') {
             await InteractionHelper.safeDefer(interaction, { flags: ['Ephemeral'] });
         }
 
-        logger.info(`App-admin command executed: ${subcommand}`, {
+        logger.info(`App-admin command executed: ${subcommandGroup ? `${subcommandGroup} ` : ''}${subcommand}`, {
             userId: interaction.user.id,
             guildId: guild.id,
+            subcommandGroup,
             subcommand
         });
 
         await ApplicationService.checkManagerPermission(interaction.client, guild.id, member);
+
+        if (subcommandGroup === "question") {
+            await handleQuestionCommand(interaction);
+            return;
+        }
 
         if (subcommand === "setup") {
             await handleSetup(interaction);
@@ -133,6 +203,150 @@ export default {
         }
     }, { type: 'command', commandName: 'app-admin' })
 };
+
+async function handleQuestionCommand(interaction) {
+    const { options, guild, client, member } = interaction;
+    const sub = options.getSubcommand();
+    const targetRole = options.getRole('role');
+    const targetRoleId = targetRole?.id;
+
+    await ApplicationService.checkManagerPermission(client, guild.id, member);
+
+    const roles = await getApplicationRoles(client, guild.id);
+    if (targetRoleId && !roles.some(r => r.roleId === targetRoleId)) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.USER_INPUT,
+            message: `The role <@&${targetRoleId}> is not configured as an application role. Use \`/app-admin setup\` or add it in the dashboard first.`
+        });
+    }
+
+    const settings = await getApplicationSettings(client, guild.id);
+    let roleSettings = null;
+    if (targetRoleId) {
+        roleSettings = await getApplicationRoleSettings(client, guild.id, targetRoleId);
+    }
+
+    let questions = targetRoleId 
+        ? (roleSettings.questions ?? settings.questions ?? getDefaultApplicationQuestions())
+        : (settings.questions ?? getDefaultApplicationQuestions());
+    
+    questions = Array.isArray(questions) ? [...questions] : getDefaultApplicationQuestions();
+
+    const targetLabel = targetRole ? `role **${targetRole.name}**` : '**Global (All Applications)**';
+
+    if (sub === 'add') {
+        const questionText = options.getString('question', true).trim();
+        if (questionText.length < 3) {
+            return await replyUserError(interaction, {
+                type: ErrorTypes.VALIDATION,
+                message: 'Question must be at least 3 characters long.'
+            });
+        }
+
+        questions.push(questionText);
+
+        if (targetRoleId) {
+            await saveApplicationRoleSettings(client, guild.id, targetRoleId, {
+                ...roleSettings,
+                questions
+            });
+        } else {
+            await saveApplicationSettings(client, guild.id, {
+                ...settings,
+                questions
+            });
+        }
+
+        const embed = successEmbed(
+            '✅ Compulsory Question Added',
+            `Added compulsory question **#${questions.length}** to ${targetLabel}:\n\n` +
+            `> "${questionText}" \\*\n\n` +
+            `⭐ **Note:** All ${questions.length} question(s) are **compulsory (\\*)** for applicants.\n\n` +
+            `**All Questions (${questions.length}):**\n` +
+            questions.map((q, i) => `${i + 1}. ${q} \\*`).join('\n')
+        );
+
+        return await InteractionHelper.safeEditReply(interaction, { embeds: [embed] });
+    }
+
+    if (sub === 'remove') {
+        const questionNum = options.getInteger('number', true);
+        if (questionNum < 1 || questionNum > questions.length) {
+            return await replyUserError(interaction, {
+                type: ErrorTypes.USER_INPUT,
+                message: `Invalid question number. Please choose a number between 1 and ${questions.length}.`
+            });
+        }
+
+        if (questions.length <= 1) {
+            return await replyUserError(interaction, {
+                type: ErrorTypes.VALIDATION,
+                message: 'You cannot remove the last question. Applications must have at least 1 compulsory question.'
+            });
+        }
+
+        const [removed] = questions.splice(questionNum - 1, 1);
+
+        if (targetRoleId) {
+            await saveApplicationRoleSettings(client, guild.id, targetRoleId, {
+                ...roleSettings,
+                questions
+            });
+        } else {
+            await saveApplicationSettings(client, guild.id, {
+                ...settings,
+                questions
+            });
+        }
+
+        const embed = successEmbed(
+            '🗑️ Question Removed',
+            `Removed question **#${questionNum}** ("${removed}") from ${targetLabel}.\n\n` +
+            `**Remaining Compulsory Questions (${questions.length}):**\n` +
+            questions.map((q, i) => `${i + 1}. ${q} \\*`).join('\n')
+        );
+
+        return await InteractionHelper.safeEditReply(interaction, { embeds: [embed] });
+    }
+
+    if (sub === 'list') {
+        const embed = createEmbed({
+            title: `📝 Application Questions — ${targetRole ? targetRole.name : 'Global'}`,
+            description: `Here are the questions configured for ${targetLabel}.\n\n` +
+                `⭐ **All questions are compulsory (\\*) for applicants to answer.**\n\n` +
+                `**Questions (${questions.length}):**\n` +
+                questions.map((q, i) => `**${i + 1}.** ${q} \\*`).join('\n') +
+                `\n\n💡 *Tip: Use \`/app-admin question add\` to add more questions, or \`/app-admin question remove\` to delete one.*`,
+            color: 'info'
+        });
+
+        return await InteractionHelper.safeEditReply(interaction, { embeds: [embed] });
+    }
+
+    if (sub === 'clear') {
+        const defaultQuestions = getDefaultApplicationQuestions();
+
+        if (targetRoleId) {
+            await saveApplicationRoleSettings(client, guild.id, targetRoleId, {
+                ...roleSettings,
+                questions: defaultQuestions
+            });
+        } else {
+            await saveApplicationSettings(client, guild.id, {
+                ...settings,
+                questions: defaultQuestions
+            });
+        }
+
+        const embed = successEmbed(
+            '🔄 Questions Reset',
+            `Reset questions for ${targetLabel} back to default (${defaultQuestions.length} compulsory questions):\n\n` +
+            defaultQuestions.map((q, i) => `**${i + 1}.** ${q} \\*`).join('\n')
+        );
+
+        return await InteractionHelper.safeEditReply(interaction, { embeds: [embed] });
+    }
+}
 
 async function handleSetup(interaction) {
     
@@ -175,7 +389,7 @@ async function handleSetup(interaction) {
         .setRequired(true);
 
     const q1Label = new LabelBuilder()
-        .setLabel('Question 1 (required)')
+        .setLabel('Question 1 * (Compulsory)')
         .setTextInputComponent(q1Input);
 
     const q2Input = new TextInputBuilder()
@@ -186,17 +400,18 @@ async function handleSetup(interaction) {
         .setRequired(false);
 
     const q2Label = new LabelBuilder()
-        .setLabel('Question 2 (optional)')
+        .setLabel('Question 2 * (Compulsory if added)')
         .setTextInputComponent(q2Input);
 
     const q3Input = new TextInputBuilder()
         .setCustomId('app_question_3')
         .setStyle(TextInputStyle.Short)
+        .setPlaceholder('e.g., How active can you be weekly?')
         .setMaxLength(100)
         .setRequired(false);
 
     const q3Label = new LabelBuilder()
-        .setLabel('Question 3 (optional)')
+        .setLabel('Question 3 * (Compulsory if added)')
         .setTextInputComponent(q3Input);
 
     modal.addLabelComponents(roleLabel, appNameLabel, q1Label, q2Label, q3Label);
@@ -260,7 +475,11 @@ async function handleSetup(interaction) {
     await submitted.reply({
         embeds: [successEmbed(
             '✅ Application Created',
-            `**${appName}** application has been created for ${role}.\n\nYou can customize the log channel, manager roles, questions, and retention period in the dashboard.`,
+            `**${appName}** application has been created for ${role} with **${questions.length} compulsory question(s) (*)**.\n\n` +
+            `⭐ **Note:** Every question asked is **compulsory (*)** for applicants to answer.\n\n` +
+            `💡 **Need more questions?** You can add unlimited questions anytime using:\n` +
+            `• \`/app-admin question add question:<text> role:${role.name}\`\n` +
+            `• Or via the interactive dashboard below.`,
         )],
         flags: ['Ephemeral'],
     });

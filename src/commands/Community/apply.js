@@ -1,5 +1,5 @@
 import { getColor, getDefaultApplicationQuestions } from '../../config/bot.js';
-import { SlashCommandBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
+import { SlashCommandBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { createEmbed, successEmbed } from '../../utils/embeds.js';
 import { logger } from '../../utils/logger.js';
 import { handleInteractionError, withErrorHandling, createError, ErrorTypes, replyUserError } from '../../utils/errorHandler.js';
@@ -17,6 +17,29 @@ import {
     updateApplication,
     getApplicationRoleSettings
 } from '../../utils/database.js';
+
+const applicationDrafts = new Map();
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, draft] of applicationDrafts.entries()) {
+        if (now - (draft.updatedAt || draft.createdAt || 0) > 30 * 60 * 1000) {
+            applicationDrafts.delete(key);
+        }
+    }
+}, 10 * 60 * 1000).unref();
+
+export function formatQuestionLabel(question, index) {
+    const prefix = `Q${index + 1}: `;
+    const suffix = ' *';
+    const maxLen = 45;
+    const allowed = maxLen - prefix.length - suffix.length;
+    const cleanQ = String(question || '').trim();
+    if (cleanQ.length > allowed) {
+        return `${prefix}${cleanQ.substring(0, Math.max(0, allowed - 3))}...${suffix}`;
+    }
+    return `${prefix}${cleanQ}${suffix}`;
+}
 
 function getApplicationStatusPresentation(statusValue) {
     const normalized = typeof statusValue === 'string' ? statusValue.trim().toLowerCase() : 'unknown';
@@ -119,7 +142,10 @@ export async function handleApplicationModal(interaction) {
     const customId = interaction.customId;
     if (!customId.startsWith('app_modal_')) return;
     
-    const roleId = customId.split('_')[2];
+    const parts = customId.split('_');
+    const roleId = parts[2];
+    const isPaged = parts[3] && parts[3].startsWith('p');
+    const pageIndex = isPaged ? parseInt(parts[3].replace('p', ''), 10) : 0;
     
     const applicationRoles = await getApplicationRoles(interaction.client, interaction.guild.id);
     const applicationRole = applicationRoles.find(appRole => appRole.roleId === roleId);
@@ -129,26 +155,99 @@ export async function handleApplicationModal(interaction) {
     }
     
     const role = interaction.guild.roles.cache.get(roleId);
-    
     if (!role) {
         return await replyUserError(interaction, { type: ErrorTypes.USER_INPUT, message: 'Role not found.' });
     }
     
-    const answers = [];
     const settings = await getApplicationSettings(interaction.client, interaction.guild.id);
-
     let questions = settings.questions?.length ? settings.questions : getDefaultApplicationQuestions();
     const roleSettings = await getApplicationRoleSettings(interaction.client, interaction.guild.id, roleId);
     if (roleSettings.questions && roleSettings.questions.length > 0) {
         questions = roleSettings.questions;
     }
+    if (!questions || questions.length === 0) {
+        questions = getDefaultApplicationQuestions();
+    }
     
-    for (let i = 0; i < questions.length; i++) {
-        const answer = interaction.fields.getTextInputValue(`q${i}`);
-        answers.push({
+    const totalPages = Math.ceil(questions.length / 5);
+    const startIndex = pageIndex * 5;
+    const endIndex = Math.min(startIndex + 5, questions.length);
+
+    const currentAnswers = [];
+    for (let i = startIndex; i < endIndex; i++) {
+        let answer = '';
+        try {
+            answer = interaction.fields.getTextInputValue(`q${i}`)?.trim() || '';
+        } catch {
+            answer = '';
+        }
+        if (!answer || answer.length < 10) {
+            return await replyUserError(interaction, {
+                type: ErrorTypes.VALIDATION,
+                message: `Answer for Question ${i + 1} is compulsory (*) and must be at least 10 characters long.`
+            });
+        }
+        currentAnswers.push({
             question: questions[i],
             answer: answer
         });
+    }
+
+    const draftKey = `${interaction.guild.id}_${interaction.user.id}_${roleId}`;
+
+    if (pageIndex + 1 < totalPages) {
+        const existingDraft = applicationDrafts.get(draftKey) || { answers: [] };
+        const prior = existingDraft.answers || [];
+        const mergedAnswers = [
+            ...prior.filter(a => !currentAnswers.some(ca => ca.question === a.question)),
+            ...currentAnswers
+        ];
+
+        applicationDrafts.set(draftKey, {
+            guildId: interaction.guild.id,
+            userId: interaction.user.id,
+            roleId,
+            roleName: applicationRole.name,
+            questions,
+            totalPages,
+            answers: mergedAnswers,
+            updatedAt: Date.now()
+        });
+
+        const nextPart = pageIndex + 2;
+        const remainingCount = questions.length - mergedAnswers.length;
+
+        const continueBtn = new ButtonBuilder()
+            .setCustomId(`app_continue_${roleId}_p${pageIndex + 1}`)
+            .setLabel(`Continue Application (Part ${nextPart}/${totalPages})`)
+            .setStyle(ButtonStyle.Primary)
+            .setEmoji('➡️');
+
+        const row = new ActionRowBuilder().addComponents(continueBtn);
+
+        return await interaction.reply({
+            embeds: [createEmbed({
+                title: `📝 Application In Progress (Part ${pageIndex + 1}/${totalPages} Complete)`,
+                description: `✅ **Part ${pageIndex + 1} answers recorded.**\n\n` +
+                    `There are still **${remainingCount} compulsory question(s) (*)** remaining.\n\n` +
+                    `Please click the button below to answer Part ${nextPart}.`,
+                color: 'info'
+            })],
+            components: [row],
+            flags: ['Ephemeral']
+        });
+    }
+
+    // Final page! Combine all answers
+    let allAnswers = currentAnswers;
+    if (pageIndex > 0) {
+        const existingDraft = applicationDrafts.get(draftKey);
+        const prior = existingDraft?.answers || [];
+        allAnswers = [
+            ...prior.filter(a => !currentAnswers.some(ca => ca.question === a.question)),
+            ...currentAnswers
+        ];
+        applicationDrafts.delete(draftKey);
     }
     
     try {
@@ -159,22 +258,24 @@ export async function handleApplicationModal(interaction) {
             roleName: applicationRole.name,
             username: interaction.user.tag,
             avatar: interaction.user.displayAvatarURL(),
-            answers: answers
+            answers: allAnswers
         });
         
         const embed = successEmbed(
             'Application Submitted',
             `Your application for **${applicationRole.name}** has been submitted successfully!\n\n` +
-            `Application ID: \`${application.id}\`\n` +
-            `You can check the status with \`/apply status id:${application.id}\``
+            `• **Compulsory Questions Answered:** ${allAnswers.length} (*)\n` +
+            `• **Application ID:** \`${application.id}\`\n\n` +
+            `You can check the status at any time with \`/apply status id:${application.id}\``
         );
         
-        await InteractionHelper.safeEditReply(interaction, { embeds: [embed], flags: ["Ephemeral"] });
+        if (interaction.deferred || interaction.replied) {
+            await InteractionHelper.safeEditReply(interaction, { embeds: [embed], components: [], flags: ["Ephemeral"] });
+        } else {
+            await interaction.reply({ embeds: [embed], components: [], flags: ["Ephemeral"] });
+        }
         
-        const settings = await getApplicationSettings(interaction.client, interaction.guild.id);
-        const roleSettings = await getApplicationRoleSettings(interaction.client, interaction.guild.id, roleId);
         const guildConfig = await getGuildConfig(interaction.client, interaction.guild.id);
-
         const logChannelId = resolveApplicationLogChannel(guildConfig, roleSettings, settings);
 
         if (logChannelId) {
@@ -189,6 +290,7 @@ export async function handleApplicationModal(interaction) {
                         formatLogLine('Applicant', `<@${interaction.user.id}> (${interaction.user.tag})`),
                         formatLogLine('Application', applicationRole.name),
                         formatLogLine('Role', role.name),
+                        formatLogLine('Questions', `${allAnswers.length} compulsory question(s)`),
                         formatLogLine('Application ID', `\`${application.id}\``),
                     ],
                     inlineFields: [
@@ -220,6 +322,59 @@ export async function handleApplicationModal(interaction) {
             handler: 'application_submission'
         });
     }
+}
+
+export async function handleApplicationContinueButton(interaction) {
+    if (!interaction.isButton()) return;
+    const parts = interaction.customId.split('_');
+    const roleId = parts[2];
+    const pageIndex = parseInt(parts[3].replace('p', ''), 10);
+    const draftKey = `${interaction.guild.id}_${interaction.user.id}_${roleId}`;
+    const draft = applicationDrafts.get(draftKey);
+
+    const applicationRoles = await getApplicationRoles(interaction.client, interaction.guild.id);
+    const applicationRole = applicationRoles.find(r => r.roleId === roleId);
+
+    if (!applicationRole) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.CONFIGURATION,
+            message: 'Application configuration not found. Please start over with `/apply submit`.'
+        });
+    }
+
+    const settings = await getApplicationSettings(interaction.client, interaction.guild.id);
+    let questions = settings.questions?.length ? settings.questions : getDefaultApplicationQuestions();
+    const roleSettings = await getApplicationRoleSettings(interaction.client, interaction.guild.id, roleId);
+    if (roleSettings.questions && roleSettings.questions.length > 0) {
+        questions = roleSettings.questions;
+    }
+    if (!questions || questions.length === 0) {
+        questions = getDefaultApplicationQuestions();
+    }
+
+    const totalPages = Math.ceil(questions.length / 5);
+    const startIndex = pageIndex * 5;
+    const endIndex = Math.min(startIndex + 5, questions.length);
+
+    const modal = new ModalBuilder()
+        .setCustomId(`app_modal_${roleId}_p${pageIndex}_${Date.now()}`)
+        .setTitle(`${applicationRole.name} (Part ${pageIndex + 1}/${totalPages})`.substring(0, 45));
+
+    for (let i = startIndex; i < endIndex; i++) {
+        const label = formatQuestionLabel(questions[i], i);
+        const input = new TextInputBuilder()
+            .setCustomId(`q${i}`)
+            .setLabel(label)
+            .setPlaceholder('Enter your answer (Compulsory *)...')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMinLength(10)
+            .setMaxLength(1000);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+    }
+
+    await interaction.showModal(modal);
 }
 
 async function handleList(interaction) {
@@ -305,24 +460,69 @@ async function handleSubmit(interaction, settings) {
     if (roleSettings.questions && roleSettings.questions.length > 0) {
         questions = roleSettings.questions;
     }
+    if (!questions || questions.length === 0) {
+        questions = getDefaultApplicationQuestions();
+    }
 
-    questions.forEach((question, index) => {
-        const input = new TextInputBuilder()
-            .setCustomId(`q${index}`)
-            .setLabel(
-                question.length > 45
-                    ? `${question.substring(0, 42)}...`
-                    : question,
-            )
-            .setStyle(TextInputStyle.Paragraph)
-            .setRequired(true)
-            .setMaxLength(1000);
+    const totalPages = Math.ceil(questions.length / 5);
 
-        const row = new ActionRowBuilder().addComponents(input);
-        modal.addComponents(row);
-    });
+    if (totalPages <= 1) {
+        const modal = new ModalBuilder()
+            .setCustomId(`app_modal_${applicationRole.roleId}`)
+            .setTitle(`Apply: ${applicationRole.name}`.substring(0, 45));
 
-    await interaction.showModal(modal);
+        questions.forEach((question, index) => {
+            const label = formatQuestionLabel(question, index);
+            const input = new TextInputBuilder()
+                .setCustomId(`q${index}`)
+                .setLabel(label)
+                .setPlaceholder('Enter your answer (Compulsory *)...')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true)
+                .setMinLength(10)
+                .setMaxLength(1000);
+
+            const row = new ActionRowBuilder().addComponents(input);
+            modal.addComponents(row);
+        });
+
+        await interaction.showModal(modal);
+    } else {
+        const draftKey = `${interaction.guild.id}_${interaction.user.id}_${applicationRole.roleId}`;
+        applicationDrafts.set(draftKey, {
+            guildId: interaction.guild.id,
+            userId: interaction.user.id,
+            roleId: applicationRole.roleId,
+            roleName: applicationRole.name,
+            questions,
+            totalPages,
+            answers: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+        });
+
+        const modal = new ModalBuilder()
+            .setCustomId(`app_modal_${applicationRole.roleId}_p0_${Date.now()}`)
+            .setTitle(`${applicationRole.name} (Part 1/${totalPages})`.substring(0, 45));
+
+        const pageQuestions = questions.slice(0, 5);
+        pageQuestions.forEach((question, idx) => {
+            const label = formatQuestionLabel(question, idx);
+            const input = new TextInputBuilder()
+                .setCustomId(`q${idx}`)
+                .setLabel(label)
+                .setPlaceholder('Enter your answer (Compulsory *)...')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true)
+                .setMinLength(10)
+                .setMaxLength(1000);
+
+            const row = new ActionRowBuilder().addComponents(input);
+            modal.addComponents(row);
+        });
+
+        await interaction.showModal(modal);
+    }
 }
 
 async function handleStatus(interaction) {

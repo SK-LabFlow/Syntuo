@@ -64,7 +64,7 @@ async function buildDashboardEmbed(settings, roles, guild, client) {
             { name: 'Log Channel', value: logChannel, inline: true },
             { name: '\u200B', value: '\u200B', inline: true },
             { name: 'Manager Roles', value: managerRoleList, inline: false },
-            { name: 'Questions', value: `${questionCount} configured — first: ${firstQ}`, inline: false },
+            { name: 'Questions', value: `${questionCount} configured (all compulsory *) — first: ${firstQ}`, inline: false },
             { name: 'Application Roles', value: roleList, inline: false },
             {
                 name: 'Retention',
@@ -92,8 +92,8 @@ function buildSelectMenu(guildId) {
                 .setValue('manager_role')
                 .setEmoji('🛡️'),
             new StringSelectMenuOptionBuilder()
-                .setLabel('Edit Questions')
-                .setDescription('Customise the questions shown on the application form')
+                .setLabel('Manage Questions')
+                .setDescription('Add, remove, or edit compulsory questions (*)')
                 .setValue('questions')
                 .setEmoji('📝'),
             new StringSelectMenuOptionBuilder()
@@ -661,8 +661,8 @@ function buildApplicationSelectMenu(guildId, roleId) {
                 .setValue('manager_role')
                 .setEmoji('🛡️'),
             new StringSelectMenuOptionBuilder()
-                .setLabel('Edit Questions')
-                .setDescription('Customise the questions shown on the application form')
+                .setLabel('Manage Questions')
+                .setDescription('Add, remove, or edit compulsory questions (*)')
                 .setValue('questions')
                 .setEmoji('📝'),
             new StringSelectMenuOptionBuilder()
@@ -798,108 +798,353 @@ async function handleManagerRole(selectInteraction, rootInteraction, settings, r
 }
 
 async function handleQuestions(selectInteraction, rootInteraction, settings, roles, guildId, client, selectedRoleId) {
+    await showQuestionManager(selectInteraction, rootInteraction, settings, roles, guildId, client, selectedRoleId);
+}
+
+async function showQuestionManager(interaction, rootInteraction, settings, roles, guildId, client, selectedRoleId) {
     let currentQuestions = settings.questions ?? [];
+    let targetName = 'Global (All Applications)';
     
     if (selectedRoleId) {
         const roleSettings = await getApplicationRoleSettings(client, guildId, selectedRoleId);
         currentQuestions = roleSettings.questions ?? currentQuestions;
+        const appRole = roles.find(r => r.roleId === selectedRoleId);
+        if (appRole) targetName = appRole.name;
     }
 
-    const modal = new ModalBuilder()
-        .setCustomId('app_cfg_questions')
-        .setTitle('Edit Application Questions')
-        .addComponents(
-            new ActionRowBuilder().addComponents(
-                new TextInputBuilder()
-                    .setCustomId('q1')
-                    .setLabel('Question 1 (required)')
-                    .setStyle(TextInputStyle.Short)
-                    .setValue(currentQuestions[0] ?? '')
-                    .setMaxLength(100)
-                    .setMinLength(1)
-                    .setRequired(true),
-            ),
-            new ActionRowBuilder().addComponents(
-                new TextInputBuilder()
-                    .setCustomId('q2')
-                    .setLabel('Question 2 (optional)')
-                    .setStyle(TextInputStyle.Short)
-                    .setValue(currentQuestions[1] ?? '')
-                    .setMaxLength(100)
-                    .setRequired(false),
-            ),
-            new ActionRowBuilder().addComponents(
-                new TextInputBuilder()
-                    .setCustomId('q3')
-                    .setLabel('Question 3 (optional)')
-                    .setStyle(TextInputStyle.Short)
-                    .setValue(currentQuestions[2] ?? '')
-                    .setMaxLength(100)
-                    .setRequired(false),
-            ),
-            new ActionRowBuilder().addComponents(
-                new TextInputBuilder()
-                    .setCustomId('q4')
-                    .setLabel('Question 4 (optional)')
-                    .setStyle(TextInputStyle.Short)
-                    .setValue(currentQuestions[3] ?? '')
-                    .setMaxLength(100)
-                    .setRequired(false),
-            ),
-            new ActionRowBuilder().addComponents(
-                new TextInputBuilder()
-                    .setCustomId('q5')
-                    .setLabel('Question 5 (optional)')
-                    .setStyle(TextInputStyle.Short)
-                    .setValue(currentQuestions[4] ?? '')
-                    .setMaxLength(100)
-                    .setRequired(false),
-            ),
-        );
-
-    await selectInteraction.showModal(modal);
-
-    const submitted = await selectInteraction
-        .awaitModalSubmit({
-            filter: i =>
-                i.customId === 'app_cfg_questions' && i.user.id === selectInteraction.user.id,
-            time: 120_000,
-        })
-        .catch(() => null);
-
-    if (!submitted) return;
-
-    const newQuestions = ['q1', 'q2', 'q3', 'q4', 'q5']
-        .map(key => submitted.fields.getTextInputValue(key).trim())
-        .filter(Boolean);
-
-    if (newQuestions.length === 0) {
-        await replyUserError(submitted, { type: ErrorTypes.USER_INPUT, message: 'At least one question is required.' });
-        return;
+    if (!currentQuestions || currentQuestions.length === 0) {
+        currentQuestions = getDefaultApplicationQuestions();
     }
 
-    if (selectedRoleId) {
-        
-        const roleSettings = await getApplicationRoleSettings(client, guildId, selectedRoleId);
-        roleSettings.questions = newQuestions;
-        await saveApplicationRoleSettings(client, guildId, selectedRoleId, roleSettings);
+    currentQuestions = Array.isArray(currentQuestions) ? currentQuestions : getDefaultApplicationQuestions();
+
+    const questionListText = currentQuestions.map((q, i) => `**${i + 1}.** ${q} \\*`).join('\n');
+
+    const embed = new EmbedBuilder()
+        .setTitle(`📝 Question Manager — ${targetName}`)
+        .setDescription(
+            `Configure questions for **${targetName}**.\n\n` +
+            `⭐ **All questions are compulsory (\\*) for applicants to answer.**\n` +
+            `Staff can add unlimited questions. If more than 5 questions are configured, the bot automatically paginates them for applicants.\n\n` +
+            `**Current Compulsory Questions (${currentQuestions.length}):**\n` +
+            questionListText
+        )
+        .setColor(getColor('info'))
+        .setFooter({ text: 'Use the buttons below to add, remove, or edit questions.' });
+
+    const btnRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`app_q_add_${selectedRoleId || 'global'}`)
+            .setLabel('Add Question')
+            .setStyle(ButtonStyle.Success)
+            .setEmoji('➕'),
+        new ButtonBuilder()
+            .setCustomId(`app_q_remove_${selectedRoleId || 'global'}`)
+            .setLabel('Remove Question')
+            .setStyle(ButtonStyle.Danger)
+            .setEmoji('➖')
+            .setDisabled(currentQuestions.length <= 1),
+        new ButtonBuilder()
+            .setCustomId(`app_q_batch_${selectedRoleId || 'global'}`)
+            .setLabel('Edit (1-5)')
+            .setStyle(ButtonStyle.Primary)
+            .setEmoji('✏️'),
+        new ButtonBuilder()
+            .setCustomId(`app_q_reset_${selectedRoleId || 'global'}`)
+            .setLabel('Reset Defaults')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('🔄'),
+        new ButtonBuilder()
+            .setCustomId(`app_q_back_${selectedRoleId || 'global'}`)
+            .setLabel('Back to Dashboard')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('🔙')
+    );
+
+    if (interaction.isModalSubmit()) {
+        await interaction.reply({
+            embeds: [embed],
+            components: [btnRow],
+            flags: MessageFlags.Ephemeral
+        });
+    } else if (interaction.deferred || interaction.replied) {
+        await InteractionHelper.safeEditReply(interaction, {
+            embeds: [embed],
+            components: [btnRow]
+        });
     } else {
-        
-        settings.questions = newQuestions;
-        await saveApplicationSettings(client, guildId, settings);
+        await interaction.update({
+            embeds: [embed],
+            components: [btnRow]
+        });
     }
 
-    await submitted.reply({
-        embeds: [
-            successEmbed(
-                '✅ Questions Updated',
-                `${newQuestions.length} question${newQuestions.length !== 1 ? 's' : ''} saved.`,
-            ),
-        ],
-        flags: MessageFlags.Ephemeral,
+    setupQuestionCollectors(interaction, rootInteraction, settings, roles, guildId, client, selectedRoleId);
+}
+
+function setupQuestionCollectors(selectInteraction, rootInteraction, settings, roles, guildId, client, selectedRoleId) {
+    const channel = selectInteraction.channel;
+    const filter = i => i.user.id === selectInteraction.user.id && i.customId.startsWith('app_q_');
+
+    const collector = channel.createMessageComponentCollector({
+        filter,
+        time: 600_000,
     });
 
-    await refreshDashboard(rootInteraction, settings, roles, guildId, client);
+    collector.on('collect', async actionInteraction => {
+        try {
+            const customId = actionInteraction.customId;
+
+            if (customId.startsWith('app_q_back_')) {
+                collector.stop('back');
+                if (selectedRoleId) {
+                    const selectedRole = roles.find(r => r.roleId === selectedRoleId) || roles[0];
+                    await showApplicationDashboard(rootInteraction, selectedRole, settings, roles, guildId, client);
+                } else {
+                    await showGlobalDashboard(rootInteraction, settings, roles, guildId, client);
+                }
+                return;
+            }
+
+            if (customId.startsWith('app_q_reset_')) {
+                const defaults = getDefaultApplicationQuestions();
+                if (selectedRoleId) {
+                    const roleSettings = await getApplicationRoleSettings(client, guildId, selectedRoleId);
+                    roleSettings.questions = defaults;
+                    await saveApplicationRoleSettings(client, guildId, selectedRoleId, roleSettings);
+                } else {
+                    settings.questions = defaults;
+                    await saveApplicationSettings(client, guildId, settings);
+                }
+                await showQuestionManager(actionInteraction, rootInteraction, settings, roles, guildId, client, selectedRoleId);
+                return;
+            }
+
+            if (customId.startsWith('app_q_add_')) {
+                const modal = new ModalBuilder()
+                    .setCustomId(`app_q_add_modal_${Date.now()}`)
+                    .setTitle('Add Compulsory Question (*)');
+
+                const input = new TextInputBuilder()
+                    .setCustomId('question_text')
+                    .setLabel('Question Text * (Compulsory)')
+                    .setPlaceholder('e.g. What relevant experience do you have?')
+                    .setStyle(TextInputStyle.Short)
+                    .setMaxLength(100)
+                    .setMinLength(3)
+                    .setRequired(true);
+
+                modal.addComponents(new ActionRowBuilder().addComponents(input));
+
+                await actionInteraction.showModal(modal);
+
+                const submitted = await actionInteraction.awaitModalSubmit({
+                    filter: i => i.customId.startsWith('app_q_add_modal_') && i.user.id === actionInteraction.user.id,
+                    time: 120_000
+                }).catch(() => null);
+
+                if (!submitted) return;
+
+                const qText = submitted.fields.getTextInputValue('question_text').trim();
+                if (qText) {
+                    let currentQuestions = settings.questions ?? [];
+                    let roleSettings = null;
+                    if (selectedRoleId) {
+                        roleSettings = await getApplicationRoleSettings(client, guildId, selectedRoleId);
+                        currentQuestions = roleSettings.questions ?? currentQuestions;
+                    }
+                    currentQuestions = Array.isArray(currentQuestions) ? [...currentQuestions] : getDefaultApplicationQuestions();
+                    currentQuestions.push(qText);
+
+                    if (selectedRoleId) {
+                        roleSettings = roleSettings || {};
+                        roleSettings.questions = currentQuestions;
+                        await saveApplicationRoleSettings(client, guildId, selectedRoleId, roleSettings);
+                    } else {
+                        settings.questions = currentQuestions;
+                        await saveApplicationSettings(client, guildId, settings);
+                    }
+
+                    await showQuestionManager(submitted, rootInteraction, settings, roles, guildId, client, selectedRoleId);
+                }
+                return;
+            }
+
+            if (customId.startsWith('app_q_remove_')) {
+                let currentQuestions = settings.questions ?? [];
+                let roleSettings = null;
+                if (selectedRoleId) {
+                    roleSettings = await getApplicationRoleSettings(client, guildId, selectedRoleId);
+                    currentQuestions = roleSettings.questions ?? currentQuestions;
+                }
+                currentQuestions = Array.isArray(currentQuestions) ? [...currentQuestions] : getDefaultApplicationQuestions();
+
+                if (currentQuestions.length <= 1) {
+                    await replyUserError(actionInteraction, {
+                        type: ErrorTypes.VALIDATION,
+                        message: 'Applications must have at least 1 compulsory question.'
+                    });
+                    return;
+                }
+
+                const options = currentQuestions.map((q, idx) => 
+                    new StringSelectMenuOptionBuilder()
+                        .setLabel(`Q${idx + 1}: ${q.substring(0, 45)}`)
+                        .setValue(String(idx))
+                        .setDescription(`Remove Question #${idx + 1}`)
+                );
+
+                const selMenu = new StringSelectMenuBuilder()
+                    .setCustomId(`app_q_sel_remove_${Date.now()}`)
+                    .setPlaceholder('Choose a question to remove...')
+                    .addOptions(options.slice(0, 25));
+
+                const cancelBtn = new ButtonBuilder()
+                    .setCustomId(`app_q_cancel_rem_${Date.now()}`)
+                    .setLabel('Cancel')
+                    .setStyle(ButtonStyle.Secondary);
+
+                await actionInteraction.update({
+                    embeds: [
+                        createEmbed({
+                            title: '🗑️ Remove Application Question',
+                            description: 'Select the question you would like to permanently remove from the list below.',
+                            color: 'warning'
+                        })
+                    ],
+                    components: [
+                        new ActionRowBuilder().addComponents(selMenu),
+                        new ActionRowBuilder().addComponents(cancelBtn)
+                    ]
+                });
+
+                const remCollector = channel.createMessageComponentCollector({
+                    filter: i => i.user.id === actionInteraction.user.id && 
+                        (i.customId.startsWith('app_q_sel_remove_') || i.customId.startsWith('app_q_cancel_rem_')),
+                    time: 60_000,
+                    max: 1
+                });
+
+                remCollector.on('collect', async remInteraction => {
+                    if (remInteraction.customId.startsWith('app_q_cancel_rem_')) {
+                        await showQuestionManager(remInteraction, rootInteraction, settings, roles, guildId, client, selectedRoleId);
+                        return;
+                    }
+                    const removeIdx = parseInt(remInteraction.values[0], 10);
+                    currentQuestions.splice(removeIdx, 1);
+
+                    if (selectedRoleId) {
+                        roleSettings = roleSettings || {};
+                        roleSettings.questions = currentQuestions;
+                        await saveApplicationRoleSettings(client, guildId, selectedRoleId, roleSettings);
+                    } else {
+                        settings.questions = currentQuestions;
+                        await saveApplicationSettings(client, guildId, settings);
+                    }
+
+                    await showQuestionManager(remInteraction, rootInteraction, settings, roles, guildId, client, selectedRoleId);
+                });
+                return;
+            }
+
+            if (customId.startsWith('app_q_batch_')) {
+                let currentQuestions = settings.questions ?? [];
+                let roleSettings = null;
+                if (selectedRoleId) {
+                    roleSettings = await getApplicationRoleSettings(client, guildId, selectedRoleId);
+                    currentQuestions = roleSettings.questions ?? currentQuestions;
+                }
+                currentQuestions = Array.isArray(currentQuestions) ? [...currentQuestions] : getDefaultApplicationQuestions();
+
+                const modal = new ModalBuilder()
+                    .setCustomId('app_cfg_questions_batch')
+                    .setTitle('Edit Compulsory Questions (1-5)')
+                    .addComponents(
+                        new ActionRowBuilder().addComponents(
+                            new TextInputBuilder()
+                                .setCustomId('q1')
+                                .setLabel('Question 1 * (Compulsory)')
+                                .setStyle(TextInputStyle.Short)
+                                .setValue(currentQuestions[0] ?? '')
+                                .setMaxLength(100)
+                                .setMinLength(1)
+                                .setRequired(true),
+                        ),
+                        new ActionRowBuilder().addComponents(
+                            new TextInputBuilder()
+                                .setCustomId('q2')
+                                .setLabel('Question 2 * (Compulsory if set)')
+                                .setStyle(TextInputStyle.Short)
+                                .setValue(currentQuestions[1] ?? '')
+                                .setMaxLength(100)
+                                .setRequired(false),
+                        ),
+                        new ActionRowBuilder().addComponents(
+                            new TextInputBuilder()
+                                .setCustomId('q3')
+                                .setLabel('Question 3 * (Compulsory if set)')
+                                .setStyle(TextInputStyle.Short)
+                                .setValue(currentQuestions[2] ?? '')
+                                .setMaxLength(100)
+                                .setRequired(false),
+                        ),
+                        new ActionRowBuilder().addComponents(
+                            new TextInputBuilder()
+                                .setCustomId('q4')
+                                .setLabel('Question 4 * (Compulsory if set)')
+                                .setStyle(TextInputStyle.Short)
+                                .setValue(currentQuestions[3] ?? '')
+                                .setMaxLength(100)
+                                .setRequired(false),
+                        ),
+                        new ActionRowBuilder().addComponents(
+                            new TextInputBuilder()
+                                .setCustomId('q5')
+                                .setLabel('Question 5 * (Compulsory if set)')
+                                .setStyle(TextInputStyle.Short)
+                                .setValue(currentQuestions[4] ?? '')
+                                .setMaxLength(100)
+                                .setRequired(false),
+                        ),
+                    );
+
+                await actionInteraction.showModal(modal);
+
+                const submitted = await actionInteraction.awaitModalSubmit({
+                    filter: i => i.customId === 'app_cfg_questions_batch' && i.user.id === actionInteraction.user.id,
+                    time: 120_000
+                }).catch(() => null);
+
+                if (!submitted) return;
+
+                const batchQuestions = ['q1', 'q2', 'q3', 'q4', 'q5']
+                    .map(key => submitted.fields.getTextInputValue(key).trim())
+                    .filter(Boolean);
+
+                if (batchQuestions.length === 0) {
+                    await replyUserError(submitted, { type: ErrorTypes.USER_INPUT, message: 'At least one compulsory question is required.' });
+                    return;
+                }
+
+                const remainingQuestions = currentQuestions.slice(5);
+                const finalQuestions = [...batchQuestions, ...remainingQuestions];
+
+                if (selectedRoleId) {
+                    roleSettings = roleSettings || {};
+                    roleSettings.questions = finalQuestions;
+                    await saveApplicationRoleSettings(client, guildId, selectedRoleId, roleSettings);
+                } else {
+                    settings.questions = finalQuestions;
+                    await saveApplicationSettings(client, guildId, settings);
+                }
+
+                await showQuestionManager(submitted, rootInteraction, settings, roles, guildId, client, selectedRoleId);
+                return;
+            }
+        } catch (err) {
+            logger.error('Error in question manager interaction:', err);
+        }
+    });
 }
 
 async function handleRoleAdd(selectInteraction, rootInteraction, settings, roles, guildId, client) {
