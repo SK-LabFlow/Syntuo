@@ -57,6 +57,38 @@ export function getApplicationStatusPresentation(statusValue) {
     return { normalized, statusLabel, statusEmoji };
 }
 
+export async function resolveOrRecoverApplicationRole(client, guild, roleId) {
+    let applicationRoles = await getApplicationRoles(client, guild.id);
+    let applicationRole = applicationRoles.find(r => r.roleId === roleId);
+
+    if (!applicationRole && roleId) {
+        const role = guild.roles.cache.get(roleId)
+            || await guild.roles.fetch(roleId).catch(() => null);
+
+        if (role) {
+            applicationRole = {
+                roleId: role.id,
+                name: role.name,
+                enabled: true
+            };
+            applicationRoles.push(applicationRole);
+            await saveApplicationRoles(client, guild.id, applicationRoles);
+
+            const settings = await getApplicationSettings(client, guild.id);
+            if (!settings.enabled) {
+                await ApplicationService.updateSettings(client, guild.id, { enabled: true });
+            }
+            logger.info('Auto-recovered application role from guild role', {
+                guildId: guild.id,
+                roleId: role.id,
+                roleName: role.name
+            });
+        }
+    }
+
+    return { applicationRole, applicationRoles };
+}
+
 export default {
     slashOnly: true,
     data: new SlashCommandBuilder()
@@ -147,16 +179,16 @@ export async function handleApplicationModal(interaction) {
     const isPaged = parts[3] && parts[3].startsWith('p');
     const pageIndex = isPaged ? parseInt(parts[3].replace('p', ''), 10) : 0;
     
-    const applicationRoles = await getApplicationRoles(interaction.client, interaction.guild.id);
-    const applicationRole = applicationRoles.find(appRole => appRole.roleId === roleId);
+    const { applicationRole } = await resolveOrRecoverApplicationRole(interaction.client, interaction.guild, roleId);
     
     if (!applicationRole) {
         return await replyUserError(interaction, { type: ErrorTypes.CONFIGURATION, message: 'Application configuration not found.' });
     }
     
-    const role = interaction.guild.roles.cache.get(roleId);
+    const role = interaction.guild.roles.cache.get(roleId)
+        || await interaction.guild.roles.fetch(roleId).catch(() => null);
     if (!role) {
-        return await replyUserError(interaction, { type: ErrorTypes.USER_INPUT, message: 'Role not found.' });
+        return await replyUserError(interaction, { type: ErrorTypes.USER_INPUT, message: 'The role for this application was not found.' });
     }
     
     const settings = await getApplicationSettings(interaction.client, interaction.guild.id);
@@ -376,8 +408,7 @@ export async function handleApplicationContinueButton(interaction) {
     const draftKey = `${interaction.guild.id}_${interaction.user.id}_${roleId}`;
     const draft = applicationDrafts.get(draftKey);
 
-    const applicationRoles = await getApplicationRoles(interaction.client, interaction.guild.id);
-    const applicationRole = applicationRoles.find(r => r.roleId === roleId);
+    const { applicationRole } = await resolveOrRecoverApplicationRole(interaction.client, interaction.guild, roleId);
 
     if (!applicationRole) {
         return await replyUserError(interaction, {
@@ -425,13 +456,12 @@ export async function handleApplicationButtonStart(interaction) {
     if (!interaction.isButton()) return;
     const roleId = interaction.customId.replace('app_apply_btn_', '');
 
-    const applicationRoles = await getApplicationRoles(interaction.client, interaction.guild.id);
-    const applicationRole = applicationRoles.find(appRole => appRole.roleId === roleId);
+    const { applicationRole } = await resolveOrRecoverApplicationRole(interaction.client, interaction.guild, roleId);
 
     if (!applicationRole) {
         return await replyUserError(interaction, {
             type: ErrorTypes.CONFIGURATION,
-            message: 'This application is no longer available or was removed.'
+            message: 'This application is no longer available or the role was removed from the server. Please run `/app-admin panel channel:#your-channel role:@Staff` to post an updated panel.'
         });
     }
 
@@ -459,11 +489,12 @@ export async function handleApplicationButtonStart(interaction) {
         });
     }
 
-    const role = interaction.guild.roles.cache.get(roleId);
+    const role = interaction.guild.roles.cache.get(roleId)
+        || await interaction.guild.roles.fetch(roleId).catch(() => null);
     if (!role) {
         return await replyUserError(interaction, {
             type: ErrorTypes.USER_INPUT,
-            message: 'The role for this application no longer exists.'
+            message: 'The role for this application no longer exists in this server.'
         });
     }
 

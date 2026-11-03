@@ -9,6 +9,7 @@ lerna-debug.log*
 
 # Local development files
 .local/
+data/
 attached_assets/
 
 # Configuration and cache files
