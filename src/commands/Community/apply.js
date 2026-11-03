@@ -10,10 +10,12 @@ import { formatLogLine, resolveUserAuthor } from '../../utils/logging/logEmbeds.
 import { getGuildConfig } from '../../services/config/guildConfig.js';
 import { 
     getApplicationSettings, 
+    saveApplicationSettings,
     getUserApplications, 
     createApplication, 
     getApplication,
     getApplicationRoles,
+    saveApplicationRoles,
     updateApplication,
     getApplicationRoleSettings
 } from '../../utils/database.js';
