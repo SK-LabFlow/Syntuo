@@ -382,6 +382,120 @@ export async function handleApplicationContinueButton(interaction) {
     await interaction.showModal(modal);
 }
 
+export async function handleApplicationButtonStart(interaction) {
+    if (!interaction.isButton()) return;
+    const roleId = interaction.customId.replace('app_apply_btn_', '');
+
+    const applicationRoles = await getApplicationRoles(interaction.client, interaction.guild.id);
+    const applicationRole = applicationRoles.find(appRole => appRole.roleId === roleId);
+
+    if (!applicationRole) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.CONFIGURATION,
+            message: 'This application is no longer available or was removed.'
+        });
+    }
+
+    if (applicationRole.enabled === false) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.CONFIGURATION,
+            message: `Applications for **${applicationRole.name}** are currently closed.`
+        });
+    }
+
+    const settings = await getApplicationSettings(interaction.client, interaction.guild.id);
+    if (!settings.enabled) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.CONFIGURATION,
+            message: 'Applications are currently disabled in this server.'
+        });
+    }
+
+    const userApps = await getUserApplications(interaction.client, interaction.guild.id, interaction.user.id);
+    const pendingApp = userApps.find(app => app.status === 'pending');
+    if (pendingApp) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.UNKNOWN,
+            message: 'You already have a pending application. Please wait for staff to review it before applying again.'
+        });
+    }
+
+    const role = interaction.guild.roles.cache.get(roleId);
+    if (!role) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.USER_INPUT,
+            message: 'The role for this application no longer exists.'
+        });
+    }
+
+    let questions = settings.questions?.length ? settings.questions : getDefaultApplicationQuestions();
+    const roleSettings = await getApplicationRoleSettings(interaction.client, interaction.guild.id, roleId);
+    if (roleSettings.questions && roleSettings.questions.length > 0) {
+        questions = roleSettings.questions;
+    }
+    if (!questions || questions.length === 0) {
+        questions = getDefaultApplicationQuestions();
+    }
+
+    const totalPages = Math.ceil(questions.length / 5);
+
+    if (totalPages <= 1) {
+        const modal = new ModalBuilder()
+            .setCustomId(`app_modal_${applicationRole.roleId}`)
+            .setTitle(`Apply: ${applicationRole.name}`.substring(0, 45));
+
+        questions.forEach((question, index) => {
+            const label = formatQuestionLabel(question, index);
+            const input = new TextInputBuilder()
+                .setCustomId(`q${index}`)
+                .setLabel(label)
+                .setPlaceholder('Enter your answer (Compulsory *)...')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true)
+                .setMinLength(10)
+                .setMaxLength(1000);
+
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+        });
+
+        await interaction.showModal(modal);
+    } else {
+        const draftKey = `${interaction.guild.id}_${interaction.user.id}_${applicationRole.roleId}`;
+        applicationDrafts.set(draftKey, {
+            guildId: interaction.guild.id,
+            userId: interaction.user.id,
+            roleId: applicationRole.roleId,
+            roleName: applicationRole.name,
+            questions,
+            totalPages,
+            answers: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+        });
+
+        const modal = new ModalBuilder()
+            .setCustomId(`app_modal_${applicationRole.roleId}_p0_${Date.now()}`)
+            .setTitle(`${applicationRole.name} (Part 1/${totalPages})`.substring(0, 45));
+
+        const pageQuestions = questions.slice(0, 5);
+        pageQuestions.forEach((question, idx) => {
+            const label = formatQuestionLabel(question, idx);
+            const input = new TextInputBuilder()
+                .setCustomId(`q${idx}`)
+                .setLabel(label)
+                .setPlaceholder('Enter your answer (Compulsory *)...')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true)
+                .setMinLength(10)
+                .setMaxLength(1000);
+
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+        });
+
+        await interaction.showModal(modal);
+    }
+}
+
 async function handleList(interaction) {
     try {
         const applicationRoles = await getApplicationRoles(interaction.client, interaction.guild.id);

@@ -321,6 +321,20 @@ export default {
             return;
           }
 
+          if (interaction.customId.startsWith('app_apply_btn_')) {
+            try {
+              const { handleApplicationButtonStart } = await import('../commands/Community/apply.js');
+              await handleApplicationButtonStart(interaction);
+            } catch (error) {
+              await handleInteractionError(interaction, error, withTraceContext({
+                type: 'button',
+                customId: interaction.customId,
+                handler: 'application_start'
+              }, interactionTraceContext));
+            }
+            return;
+          }
+
           if (interaction.customId.startsWith('shared_todo_')) {
             const parts = interaction.customId.split('_');
             const buttonType = parts.slice(0, 3).join('_');

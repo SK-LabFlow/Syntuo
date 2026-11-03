@@ -98,6 +98,46 @@ export default {
                     .setAutocomplete(true),
             ),
     )
+    .addSubcommand((subcommand) =>
+        subcommand
+            .setName("panel")
+            .setDescription("Send an application panel to a channel so members can click to apply")
+            .addChannelOption((option) =>
+                option
+                    .setName("channel")
+                    .setDescription("The channel where the application panel will be posted")
+                    .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+                    .setRequired(true),
+            )
+            .addStringOption((option) =>
+                option
+                    .setName("application")
+                    .setDescription("The application role to apply for (leave empty for default)")
+                    .setRequired(false)
+                    .setAutocomplete(true),
+            )
+            .addStringOption((option) =>
+                option
+                    .setName("title")
+                    .setDescription("Custom panel title (default: Staff Application)")
+                    .setRequired(false)
+                    .setMaxLength(256),
+            )
+            .addStringOption((option) =>
+                option
+                    .setName("description")
+                    .setDescription("Custom panel description / instructions")
+                    .setRequired(false)
+                    .setMaxLength(2000),
+            )
+            .addStringOption((option) =>
+                option
+                    .setName("button_text")
+                    .setDescription("Custom button label (default: Apply for Staff)")
+                    .setRequired(false)
+                    .setMaxLength(80),
+            ),
+    )
     .addSubcommandGroup((group) =>
         group
             .setName("question")
@@ -211,7 +251,9 @@ export default {
             return;
         }
 
-        if (subcommand === "setup") {
+        if (subcommand === "panel") {
+            await handlePanel(interaction);
+        } else if (subcommand === "setup") {
             await handleSetup(interaction);
         } else if (subcommand === "review") {
             await handleReview(interaction);
@@ -223,6 +265,127 @@ export default {
         }
     }, { type: 'command', commandName: 'app-admin' })
 };
+
+async function handlePanel(interaction) {
+    const { options, guild, client, member } = interaction;
+    await ApplicationService.checkManagerPermission(client, guild.id, member);
+
+    const targetChannel = options.getChannel('channel', true);
+    const selectedAppName = options.getString('application');
+    const customTitle = options.getString('title');
+    const customDesc = options.getString('description');
+    const customBtnText = options.getString('button_text');
+
+    const applicationRoles = await getApplicationRoles(client, guild.id);
+    if (!applicationRoles || applicationRoles.length === 0) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.CONFIGURATION,
+            message: 'No application roles are configured yet. Please run `/app-admin setup` first to configure your Staff role, or create an application role in `/app-admin dashboard`.'
+        });
+    }
+
+    let targetAppRole = null;
+    if (selectedAppName) {
+        targetAppRole = applicationRoles.find(r => r.name.toLowerCase() === selectedAppName.toLowerCase());
+        if (!targetAppRole) {
+            return await replyUserError(interaction, {
+                type: ErrorTypes.USER_INPUT,
+                message: `Application "${selectedAppName}" not found. Configured applications: ${applicationRoles.map(r => `\`${r.name}\``).join(', ')}`
+            });
+        }
+    } else if (applicationRoles.length === 1) {
+        targetAppRole = applicationRoles[0];
+    }
+
+    const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
+    if (botMember && !targetChannel.permissionsFor(botMember)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.PERMISSION,
+            message: `I lack permissions to send messages and embed links in ${targetChannel}. Please grant me the required permissions.`
+        });
+    }
+
+    const settings = await getApplicationSettings(client, guild.id);
+
+    if (targetAppRole) {
+        const roleSettings = await getApplicationRoleSettings(client, guild.id, targetAppRole.roleId);
+        const questions = roleSettings.questions || settings.questions || getDefaultApplicationQuestions();
+
+        const title = customTitle || `📋 ${targetAppRole.name} Application`;
+        const description = customDesc || (
+            `Interested in applying for **${targetAppRole.name}**?\n\n` +
+            `• Click the button below to open the application form.\n` +
+            `• There are **${questions.length} compulsory questions (*)** to answer.\n` +
+            `• Please provide thorough, detailed, and honest answers.\n\n` +
+            `*Your submission will be forwarded directly to server leadership for review.*`
+        );
+
+        const embed = createEmbed({
+            title,
+            description,
+            color: 'primary'
+        }).setFooter({ text: `${guild.name} Staff Applications • Click below to apply` });
+
+        const btn = new ButtonBuilder()
+            .setCustomId(`app_apply_btn_${targetAppRole.roleId}`)
+            .setLabel(customBtnText || `Apply for ${targetAppRole.name}`)
+            .setStyle(ButtonStyle.Success)
+            .setEmoji('📝');
+
+        const row = new ActionRowBuilder().addComponents(btn);
+
+        const sentMsg = await targetChannel.send({
+            embeds: [embed],
+            components: [row]
+        });
+
+        return await InteractionHelper.safeEditReply(interaction, {
+            embeds: [successEmbed(
+                '✅ Application Panel Sent',
+                `Successfully posted the application panel for **${targetAppRole.name}** into ${targetChannel}!\n\n` +
+                `Members can now click the button to apply directly.\n` +
+                `[Jump to Panel Message](${sentMsg.url})`
+            )]
+        });
+    }
+
+    const title = customTitle || `📋 Server Applications`;
+    const description = customDesc || (
+        `Welcome to our server application center!\n\n` +
+        `Click any role button below to start your application.\n` +
+        `All questions are **compulsory (*)** and will be reviewed by our administration team.`
+    );
+
+    const embed = createEmbed({
+        title,
+        description,
+        color: 'primary'
+    }).setFooter({ text: `${guild.name} Applications • Click a button to apply` });
+
+    const buttons = applicationRoles.slice(0, 5).map(appRole =>
+        new ButtonBuilder()
+            .setCustomId(`app_apply_btn_${appRole.roleId}`)
+            .setLabel(`Apply: ${appRole.name}`)
+            .setStyle(ButtonStyle.Primary)
+            .setEmoji('📝')
+    );
+
+    const row = new ActionRowBuilder().addComponents(buttons);
+
+    const sentMsg = await targetChannel.send({
+        embeds: [embed],
+        components: [row]
+    });
+
+    return await InteractionHelper.safeEditReply(interaction, {
+        embeds: [successEmbed(
+            '✅ Application Panel Sent',
+            `Successfully posted the application panel with **${buttons.length} role(s)** into ${targetChannel}!\n\n` +
+            `Members can now click the buttons to apply directly.\n` +
+            `[Jump to Panel Message](${sentMsg.url})`
+        )]
+    });
+}
 
 async function handleQuestionCommand(interaction) {
     const { options, guild, client, member } = interaction;
