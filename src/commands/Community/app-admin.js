@@ -109,6 +109,12 @@ export default {
                     .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
                     .setRequired(true),
             )
+            .addRoleOption((option) =>
+                option
+                    .setName("role")
+                    .setDescription("The Discord role members will apply for (e.g. @Staff)")
+                    .setRequired(false),
+            )
             .addStringOption((option) =>
                 option
                     .setName("application")
@@ -271,21 +277,48 @@ async function handlePanel(interaction) {
     await ApplicationService.checkManagerPermission(client, guild.id, member);
 
     const targetChannel = options.getChannel('channel', true);
+    const specifiedRole = options.getRole('role');
     const selectedAppName = options.getString('application');
     const customTitle = options.getString('title');
     const customDesc = options.getString('description');
     const customBtnText = options.getString('button_text');
 
-    const applicationRoles = await getApplicationRoles(client, guild.id);
+    let applicationRoles = await getApplicationRoles(client, guild.id);
+    const settings = await getApplicationSettings(client, guild.id);
+
+    // If staff specified a role directly (e.g. role:@Staff), auto-register it if not already present
+    if (specifiedRole) {
+        let existingRole = applicationRoles.find(r => r.roleId === specifiedRole.id);
+        if (!existingRole) {
+            existingRole = {
+                roleId: specifiedRole.id,
+                name: specifiedRole.name,
+                enabled: true
+            };
+            applicationRoles.push(existingRole);
+            await saveApplicationRoles(client, guild.id, applicationRoles);
+
+            const questions = settings.questions?.length ? settings.questions : getDefaultApplicationQuestions();
+            await saveApplicationRoleSettings(client, guild.id, specifiedRole.id, { questions });
+        }
+        if (!settings.enabled) {
+            await ApplicationService.updateSettings(client, guild.id, { enabled: true });
+        }
+    }
+
     if (!applicationRoles || applicationRoles.length === 0) {
         return await replyUserError(interaction, {
             type: ErrorTypes.CONFIGURATION,
-            message: 'No application roles are configured yet. Please run `/app-admin setup` first to configure your Staff role, or create an application role in `/app-admin dashboard`.'
+            message: 'No application role is configured yet. You can either:\n' +
+                '1️⃣ Specify the role directly: `/app-admin panel channel:#channel role:@Staff`\n' +
+                '2️⃣ Or run `/app-admin setup` first to configure your application role.'
         });
     }
 
     let targetAppRole = null;
-    if (selectedAppName) {
+    if (specifiedRole) {
+        targetAppRole = applicationRoles.find(r => r.roleId === specifiedRole.id);
+    } else if (selectedAppName) {
         targetAppRole = applicationRoles.find(r => r.name.toLowerCase() === selectedAppName.toLowerCase());
         if (!targetAppRole) {
             return await replyUserError(interaction, {
@@ -304,8 +337,6 @@ async function handlePanel(interaction) {
             message: `I lack permissions to send messages and embed links in ${targetChannel}. Please grant me the required permissions.`
         });
     }
-
-    const settings = await getApplicationSettings(client, guild.id);
 
     if (targetAppRole) {
         const roleSettings = await getApplicationRoleSettings(client, guild.id, targetAppRole.roleId);
@@ -686,16 +717,20 @@ async function handleSetup(interaction) {
         await ApplicationService.updateSettings(interaction.client, interaction.guild.id, { enabled: true });
     }
 
-    await saveApplicationRoleSettings(interaction.client, interaction.guild.id, roleId, { questions });
+    const finalQuestions = questions.length > 0
+        ? questions
+        : (settings.questions?.length ? settings.questions : getDefaultApplicationQuestions());
+
+    await saveApplicationRoleSettings(interaction.client, interaction.guild.id, roleId, { questions: finalQuestions });
 
     await submitted.reply({
         embeds: [successEmbed(
             '✅ Application Created',
-            `**${appName}** application has been created for ${role} with **${questions.length} compulsory question(s) (*)**.\n\n` +
+            `**${appName}** application has been created for ${role} with **${finalQuestions.length} compulsory question(s) (*)**.\n\n` +
             `⭐ **Note:** Every question asked is **compulsory (*)** for applicants to answer.\n\n` +
-            `💡 **Need more questions?** You can add unlimited questions anytime using:\n` +
-            `• \`/app-admin question add question:<text> role:${role.name}\`\n` +
-            `• Or via the interactive dashboard below.`,
+            `💡 **Tip:** You can now post the click-to-apply panel using:\n` +
+            `• \`/app-admin panel channel:#your-channel application:${appName}\`\n\n` +
+            `You can also manage settings and questions in the dashboard below.`,
         )],
         flags: ['Ephemeral'],
     });
