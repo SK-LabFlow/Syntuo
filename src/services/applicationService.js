@@ -45,7 +45,7 @@ class ApplicationService {
         }
 
         for (const answer of data.answers) {
-            const sanitizedQuestion = this.sanitizeApplicationText(answer.question, 200);
+            const sanitizedQuestion = this.sanitizeApplicationText(answer.question, 500);
             const sanitizedAnswer = this.sanitizeApplicationText(answer.answer, 1000);
 
             if (!sanitizedQuestion || !sanitizedAnswer) {
@@ -150,7 +150,7 @@ class ApplicationService {
             const sanitizedData = {
                 ...data,
                 answers: data.answers.map(answer => ({
-                    question: this.sanitizeApplicationText(answer.question, 200),
+                    question: this.sanitizeApplicationText(answer.question, 500),
                     answer: this.sanitizeApplicationText(answer.answer, 1000)
                 }))
             };
@@ -298,7 +298,7 @@ class ApplicationService {
                 }
 
                 updates.questions = updates.questions.map(q => 
-                    typeof q === 'string' ? q.trim().substring(0, 100) : q
+                    typeof q === 'string' ? q.trim().substring(0, 500) : q
                 );
             }
 

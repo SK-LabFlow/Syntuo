@@ -1,6 +1,6 @@
 import { SlashCommandBuilder, PermissionFlagsBits, PermissionsBitField, ChannelType, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ComponentType, LabelBuilder, RoleSelectMenuBuilder } from 'discord.js';
 import { createEmbed, successEmbed } from '../../utils/embeds.js';
-import { getColor, getApplicationStatusColor, getDefaultApplicationQuestions } from '../../config/bot.js';
+import { getColor, getApplicationStatusColor, getDefaultApplicationQuestions, STAFF_APPLICATION_QUESTIONS } from '../../config/bot.js';
 import { logger } from '../../utils/logger.js';
 import { withErrorHandling, createError, ErrorTypes, replyUserError } from '../../utils/errorHandler.js';
 import ApplicationService from '../../services/applicationService.js';
@@ -109,9 +109,29 @@ export default {
                     .addStringOption((opt) =>
                         opt
                             .setName("question")
-                            .setDescription("The question text to ask applicants (max 100 characters)")
+                            .setDescription("The question text to ask applicants (max 300 characters)")
                             .setRequired(true)
-                            .setMaxLength(100)
+                            .setMaxLength(300)
+                    )
+                    .addRoleOption((opt) =>
+                        opt
+                            .setName("role")
+                            .setDescription("Target a specific application role (leave empty for global)")
+                            .setRequired(false)
+                    )
+            )
+            .addSubcommand((sub) =>
+                sub
+                    .setName("preset")
+                    .setDescription("Load a question preset (e.g. staff application)")
+                    .addStringOption((opt) =>
+                        opt
+                            .setName("name")
+                            .setDescription("The preset template to load")
+                            .setRequired(true)
+                            .addChoices(
+                                { name: "Staff Application (7 compulsory questions)", value: "staff" },
+                            )
                     )
                     .addRoleOption((opt) =>
                         opt
@@ -346,6 +366,39 @@ async function handleQuestionCommand(interaction) {
 
         return await InteractionHelper.safeEditReply(interaction, { embeds: [embed] });
     }
+
+    if (sub === 'preset') {
+        const presetName = options.getString('name', true);
+        let presetQuestions = [];
+        let presetTitle = '';
+
+        if (presetName === 'staff') {
+            presetQuestions = [...STAFF_APPLICATION_QUESTIONS];
+            presetTitle = 'Staff Application (7 Compulsory Questions)';
+        }
+
+        if (targetRoleId) {
+            await saveApplicationRoleSettings(client, guild.id, targetRoleId, {
+                ...roleSettings,
+                questions: presetQuestions
+            });
+        } else {
+            await saveApplicationSettings(client, guild.id, {
+                ...settings,
+                questions: presetQuestions
+            });
+        }
+
+        const embed = successEmbed(
+            '📋 Preset Loaded Successfully',
+            `Loaded **${presetTitle}** for ${targetLabel}.\n\n` +
+            `⭐ **All ${presetQuestions.length} questions are compulsory (\\*) for applicants.**\n\n` +
+            `**Configured Questions:**\n` +
+            presetQuestions.map((q, i) => `**${i + 1}.** ${q} \\*`).join('\n\n')
+        );
+
+        return await InteractionHelper.safeEditReply(interaction, { embeds: [embed] });
+    }
 }
 
 async function handleSetup(interaction) {
@@ -513,9 +566,10 @@ async function handleReview(interaction) {
 
     if (application.answers && application.answers.length > 0) {
         application.answers.forEach((item, index) => {
+            const qTitle = `Q${index + 1}: ${item.question}`;
             appEmbed.addFields({
-                name: `Q${index + 1}: ${item.question}`,
-                value: item.answer || '*No answer provided*',
+                name: qTitle.length > 256 ? `${qTitle.substring(0, 253)}...` : qTitle,
+                value: (item.answer || '*No answer provided*').substring(0, 1024),
                 inline: false
             });
         });

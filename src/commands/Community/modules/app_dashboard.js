@@ -928,9 +928,9 @@ function setupQuestionCollectors(selectInteraction, rootInteraction, settings, r
                 const input = new TextInputBuilder()
                     .setCustomId('question_text')
                     .setLabel('Question Text * (Compulsory)')
-                    .setPlaceholder('e.g. What relevant experience do you have?')
-                    .setStyle(TextInputStyle.Short)
-                    .setMaxLength(100)
+                    .setPlaceholder('e.g. What is your background in development?')
+                    .setStyle(TextInputStyle.Paragraph)
+                    .setMaxLength(300)
                     .setMinLength(3)
                     .setRequired(true);
 

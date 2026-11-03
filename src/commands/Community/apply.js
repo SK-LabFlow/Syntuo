@@ -216,6 +216,10 @@ export async function handleApplicationModal(interaction) {
 
         const nextPart = pageIndex + 2;
         const remainingCount = questions.length - mergedAnswers.length;
+        const nextStart = (pageIndex + 1) * 5;
+        const nextEnd = Math.min(nextStart + 5, questions.length);
+        const upcomingQuestions = questions.slice(nextStart, nextEnd);
+        const upcomingText = upcomingQuestions.map((q, idx) => `**Q${nextStart + idx + 1}.** ${q} \\*`).join('\n\n');
 
         const continueBtn = new ButtonBuilder()
             .setCustomId(`app_continue_${roleId}_p${pageIndex + 1}`)
@@ -229,7 +233,8 @@ export async function handleApplicationModal(interaction) {
             embeds: [createEmbed({
                 title: `📝 Application In Progress (Part ${pageIndex + 1}/${totalPages} Complete)`,
                 description: `✅ **Part ${pageIndex + 1} answers recorded.**\n\n` +
-                    `There are still **${remainingCount} compulsory question(s) (*)** remaining.\n\n` +
+                    `**Upcoming Compulsory Questions (Part ${nextPart}):**\n` +
+                    `${upcomingText}\n\n` +
                     `Please click the button below to answer Part ${nextPart}.`,
                 color: 'info'
             })],

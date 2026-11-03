@@ -61,9 +61,34 @@ export const botConfig = {
   applications: {
     // Default questions shown when someone fills out an application.
     defaultQuestions: [
-      { question: "What is your name?", required: true },
-      { question: "How old are you?", required: true },
-      { question: "Why do you want to join?", required: true },
+      {
+        question: "What is your background in software development, project management, or client work?",
+        required: true,
+      },
+      {
+        question: "Why do you want to staff a paid software development server?",
+        required: true,
+      },
+      {
+        question: "A client and a developer are in a dispute over a paid project (e.g., the client claims the code isn't working as requested or the developer hasn't delivered). How do you handle mediation as staff?",
+        required: true,
+      },
+      {
+        question: "A user attempts to post or sell compiled malware, malicious source code, or a stolen project template in the marketplace/hiring channels. What is your immediate action?",
+        required: true,
+      },
+      {
+        question: "A new developer joins and tries to poach clients away from the server by DMing them to do deals off-platform (bypassing server middleman/fees/escrow). How do you handle it?",
+        required: true,
+      },
+      {
+        question: "How do you handle stressful situations or frustrated clients who are demanding refunds or quick fixes?",
+        required: true,
+      },
+      {
+        question: "Can you commit to actively managing tickets, verifying project scopes, and maintaining server security?",
+        required: true,
+      },
     ],
 
     // Embed colors by application status.
@@ -614,6 +639,16 @@ export function getApplicationStatusColor(status) {
   const hex = colors[status];
   return hex ? getColor(hex) : getColor(status === "approved" ? "success" : status === "denied" ? "error" : "warning");
 }
+
+export const STAFF_APPLICATION_QUESTIONS = [
+  "What is your background in software development, project management, or client work?",
+  "Why do you want to staff a paid software development server?",
+  "A client and a developer are in a dispute over a paid project (e.g., the client claims the code isn't working as requested or the developer hasn't delivered). How do you handle mediation as staff?",
+  "A user attempts to post or sell compiled malware, malicious source code, or a stolen project template in the marketplace/hiring channels. What is your immediate action?",
+  "A new developer joins and tries to poach clients away from the server by DMing them to do deals off-platform (bypassing server middleman/fees/escrow). How do you handle it?",
+  "How do you handle stressful situations or frustrated clients who are demanding refunds or quick fixes?",
+  "Can you commit to actively managing tickets, verifying project scopes, and maintaining server security?",
+];
 
 export function getDefaultApplicationQuestions() {
   return (botConfig.applications?.defaultQuestions || []).map((entry) =>
