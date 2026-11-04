@@ -533,6 +533,14 @@ async function handleSetReviewChannel(interaction) {
     await saveApplicationSettings(client, guild.id, settings);
     await setLogChannel(client, guild.id, 'applications', channel.id);
 
+    // Ensure all application roles route to this review channel
+    const applicationRoles = await getApplicationRoles(client, guild.id);
+    for (const appRole of applicationRoles) {
+        const roleSettings = await getApplicationRoleSettings(client, guild.id, appRole.roleId);
+        roleSettings.logChannelId = channel.id;
+        await saveApplicationRoleSettings(client, guild.id, appRole.roleId, roleSettings);
+    }
+
     return await InteractionHelper.safeEditReply(interaction, {
         embeds: [successEmbed(
             '✅ Review Channel Configured',
