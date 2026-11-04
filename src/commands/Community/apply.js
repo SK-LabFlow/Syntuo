@@ -315,15 +315,27 @@ export async function handleApplicationModal(interaction) {
         }
         
         const guildConfig = await getGuildConfig(interaction.client, interaction.guild.id);
-        const logChannelId = resolveApplicationLogChannel(guildConfig, roleSettings, settings);
+        let logChannelId = resolveApplicationLogChannel(guildConfig, roleSettings, settings);
+        if (!logChannelId) {
+            logChannelId = roleSettings?.logChannelId
+                || settings?.logChannelId
+                || settings?.panelChannelId
+                || interaction.channelId;
+        }
 
         if (logChannelId) {
+            let reviewEmbed = null;
+            let reviewButtons = null;
             try {
-                const logChannel = interaction.guild.channels.cache.get(logChannelId)
+                let logChannel = interaction.guild.channels.cache.get(logChannelId)
                     || await interaction.guild.channels.fetch(logChannelId).catch(() => null);
 
+                if (!logChannel && interaction.channel) {
+                    logChannel = interaction.channel;
+                }
+
                 if (logChannel && logChannel.isTextBased()) {
-                    const reviewEmbed = new EmbedBuilder()
+                    reviewEmbed = new EmbedBuilder()
                         .setTitle(`📋 New Staff Application: ${applicationRole.name}`)
                         .setColor(getColor('info') || 0x5865F2)
                         .setAuthor({
@@ -351,7 +363,7 @@ export async function handleApplicationModal(interaction) {
                         });
                     });
 
-                    const reviewButtons = new ActionRowBuilder().addComponents(
+                    reviewButtons = new ActionRowBuilder().addComponents(
                         new ButtonBuilder()
                             .setCustomId(`app_channel_approve_${application.id}`)
                             .setLabel('Approve')
@@ -383,6 +395,14 @@ export async function handleApplicationModal(interaction) {
                     logChannelId,
                     applicationId: application.id
                 });
+
+                if (reviewEmbed && reviewButtons && interaction.channel && interaction.channel.isTextBased() && interaction.channel.id !== logChannelId) {
+                    await interaction.channel.send({
+                        content: `⚠️ **Staff Notice:** Application card for <@${interaction.user.id}> could not be delivered to <#${logChannelId}> (${postErr.message}). Delivered here as fallback:`,
+                        embeds: [reviewEmbed],
+                        components: [reviewButtons]
+                    }).catch(() => null);
+                }
             }
         }
         

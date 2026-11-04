@@ -17,7 +17,8 @@ import {
     deleteApplication
 } from '../../utils/database.js';
 import { InteractionHelper } from '../../utils/interactionHelper.js';
-import { setLogChannel } from '../../services/loggingService.js';
+import { setLogChannel, resolveApplicationLogChannel } from '../../services/loggingService.js';
+import { getGuildConfig } from '../../services/config/guildConfig.js';
 import appDashboard from './modules/app_dashboard.js';
 
 function getApplicationStatusPresentation(statusValue) {
@@ -114,6 +115,24 @@ export default {
                 option
                     .setName("role")
                     .setDescription("Optionally set this channel for a specific application role only")
+                    .setRequired(false),
+            ),
+    )
+    .addSubcommand((subcommand) =>
+        subcommand
+            .setName("resend")
+            .setDescription("Resend pending application submission(s) to the review channel")
+            .addStringOption((option) =>
+                option
+                    .setName("id")
+                    .setDescription("Application ID to resend (leave empty to send latest pending)")
+                    .setRequired(false),
+            )
+            .addChannelOption((option) =>
+                option
+                    .setName("channel")
+                    .setDescription("Override channel to send the review card to (defaults to review channel)")
+                    .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
                     .setRequired(false),
             ),
     )
@@ -283,7 +302,9 @@ export default {
             return;
         }
 
-        if (subcommand === "channel") {
+        if (subcommand === "resend") {
+            await handleResendApplication(interaction);
+        } else if (subcommand === "channel") {
             await handleSetReviewChannel(interaction);
         } else if (subcommand === "panel") {
             await handlePanel(interaction);
@@ -315,12 +336,17 @@ async function handlePanel(interaction) {
     let applicationRoles = await getApplicationRoles(client, guild.id);
     const settings = await getApplicationSettings(client, guild.id);
 
-    // If review channel is specified, configure it as the applications log channel
-    if (reviewChannel) {
-        settings.logChannelId = reviewChannel.id;
-        await saveApplicationSettings(client, guild.id, settings);
-        await setLogChannel(client, guild.id, 'applications', reviewChannel.id);
-    }
+    // Save panel channel
+    settings.panelChannelId = targetChannel.id;
+
+    // Determine the review channel:
+    // 1. Explicit review_channel if provided
+    // 2. Existing settings.logChannelId if already set
+    // 3. Fallback to targetChannel (so applications automatically appear in the channel the user gave!)
+    const effectiveReviewChannelId = reviewChannel?.id || settings.logChannelId || targetChannel.id;
+    settings.logChannelId = effectiveReviewChannelId;
+    await saveApplicationSettings(client, guild.id, settings);
+    await setLogChannel(client, guild.id, 'applications', effectiveReviewChannelId);
 
     // If staff specified a role directly (e.g. role:@Staff), auto-register it if not already present
     if (specifiedRole) {
@@ -337,11 +363,11 @@ async function handlePanel(interaction) {
             const questions = settings.questions?.length ? settings.questions : getDefaultApplicationQuestions();
             await saveApplicationRoleSettings(client, guild.id, specifiedRole.id, {
                 questions,
-                ...(reviewChannel ? { logChannelId: reviewChannel.id } : {})
+                logChannelId: effectiveReviewChannelId
             });
-        } else if (reviewChannel) {
+        } else {
             const roleSettings = await getApplicationRoleSettings(client, guild.id, specifiedRole.id);
-            roleSettings.logChannelId = reviewChannel.id;
+            roleSettings.logChannelId = effectiveReviewChannelId;
             await saveApplicationRoleSettings(client, guild.id, specifiedRole.id, roleSettings);
         }
         if (!settings.enabled) {
@@ -512,6 +538,124 @@ async function handleSetReviewChannel(interaction) {
             '✅ Review Channel Configured',
             `All submitted applications will now appear directly in ${channel}!\n\n` +
             `Staff will see all questions & answers with **Approve** and **Deny** buttons right on the message.`
+        )]
+    });
+}
+
+async function handleResendApplication(interaction) {
+    const { client, guild, member, options } = interaction;
+    await ApplicationService.checkManagerPermission(client, guild.id, member);
+
+    const targetAppId = options.getString('id');
+    const targetChannelOverride = options.getChannel('channel');
+
+    const pendingApps = await getApplications(client, guild.id, { status: 'pending' });
+    if (!pendingApps || pendingApps.length === 0) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.USER_INPUT,
+            message: 'No pending applications found in this server to resend.'
+        });
+    }
+
+    let targetApp = null;
+    if (targetAppId) {
+        targetApp = pendingApps.find(a => a.id === targetAppId);
+        if (!targetApp) {
+            return await replyUserError(interaction, {
+                type: ErrorTypes.USER_INPUT,
+                message: `Application with ID \`${targetAppId}\` not found in pending applications.`
+            });
+        }
+    } else {
+        // Default to the most recent pending application
+        targetApp = pendingApps.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
+    }
+
+    const settings = await getApplicationSettings(client, guild.id);
+    const roleSettings = await getApplicationRoleSettings(client, guild.id, targetApp.roleId);
+    const guildConfig = await getGuildConfig(client, guild.id);
+
+    const logChannelId = targetChannelOverride?.id
+        || resolveApplicationLogChannel(guildConfig, roleSettings, settings)
+        || roleSettings.logChannelId
+        || settings.logChannelId
+        || settings.panelChannelId
+        || interaction.channelId;
+
+    const logChannel = targetChannelOverride
+        || guild.channels.cache.get(logChannelId)
+        || await guild.channels.fetch(logChannelId).catch(() => null);
+
+    if (!logChannel || !logChannel.isTextBased()) {
+        return await replyUserError(interaction, {
+            type: ErrorTypes.CONFIGURATION,
+            message: `Could not find a valid text channel to post to. Please specify one using \`/app-admin resend channel:#your-channel\`.`
+        });
+    }
+
+    const role = guild.roles.cache.get(targetApp.roleId)
+        || await guild.roles.fetch(targetApp.roleId).catch(() => null);
+    const applicantUser = await client.users.fetch(targetApp.userId).catch(() => null);
+
+    const reviewEmbed = new EmbedBuilder()
+        .setTitle(`📋 Application: ${targetApp.roleName || 'Staff'}`)
+        .setColor(getColor('info') || 0x5865F2)
+        .setAuthor({
+            name: `${applicantUser ? applicantUser.tag : 'Applicant'} (${targetApp.userId})`,
+            iconURL: applicantUser ? applicantUser.displayAvatarURL({ dynamic: true }) : null
+        })
+        .setDescription(
+            `**Applicant:** <@${targetApp.userId}>\n` +
+            `**Role Applied For:** ${role ? `<@&${role.id}> (\`${role.name}\`)` : `\`${targetApp.roleName}\``}\n` +
+            `**Application ID:** \`${targetApp.id}\`\n` +
+            `**Status:** 🟡 **Pending Review**\n` +
+            `**Submitted:** <t:${Math.floor((targetApp.createdAt || Date.now()) / 1000)}:F> (<t:${Math.floor((targetApp.createdAt || Date.now()) / 1000)}:R>)\n\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
+        )
+        .setFooter({ text: `Application ID: ${targetApp.id} • Use buttons below to review` })
+        .setTimestamp();
+
+    if (targetApp.answers && Array.isArray(targetApp.answers)) {
+        targetApp.answers.forEach((ans, idx) => {
+            const qTitle = `Q${idx + 1}: ${ans.question}`;
+            const qAns = ans.answer || '*No answer provided*';
+            reviewEmbed.addFields({
+                name: qTitle.length > 256 ? `${qTitle.substring(0, 253)}...` : qTitle,
+                value: qAns.length > 1024 ? `${qAns.substring(0, 1020)}...` : qAns,
+                inline: false
+            });
+        });
+    }
+
+    const reviewButtons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`app_channel_approve_${targetApp.id}`)
+            .setLabel('Approve')
+            .setEmoji('✅')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId(`app_channel_deny_${targetApp.id}`)
+            .setLabel('Deny')
+            .setEmoji('❌')
+            .setStyle(ButtonStyle.Danger)
+    );
+
+    const sentMsg = await logChannel.send({
+        embeds: [reviewEmbed],
+        components: [reviewButtons]
+    });
+
+    await updateApplication(client, guild.id, targetApp.id, {
+        logMessageId: sentMsg.id,
+        logChannelId: logChannel.id,
+    });
+
+    return await InteractionHelper.safeEditReply(interaction, {
+        embeds: [successEmbed(
+            '✅ Application Sent to Channel',
+            `Successfully posted application \`${targetApp.id}\` for <@${targetApp.userId}> into ${logChannel}!\n\n` +
+            `Staff can click **Approve** or **Deny** directly on the card in that channel.\n` +
+            `[Jump to Message](${sentMsg.url})`
         )]
     });
 }
